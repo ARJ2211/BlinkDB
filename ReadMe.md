@@ -1,354 +1,404 @@
-# 🧠 BlinkDB — Versioned, Time‑Traveling, In‑Memory KV (with TTL & Tombstones)
+# 🧠 BlinkDB — Versioned, Time-Traveling, In-Memory KV (TTL, CAS, Tombstones)
 
-A compact, test‑driven **Go** key–value store that keeps **full per‑key history**, supports **TTL**, exposes **atomic CAS**, and answers **time‑travel queries** (“what did this key look like at time _t_?”). Explicit deletes are recorded as **tombstones**, so time travel reflects removals.
+A compact, test-driven **Go** key–value store that keeps **full per-key history**, supports **TTL**, exposes **versioned CAS**, and answers **time-travel queries** (“what did this key look like at time _t_?”). Explicit deletes are recorded as **tombstones**, so time travel reflects removals.
 
-> **Status:** Milestone **1E** (store layer) is complete — versions, TTL, CAS, append‑only history, `GetWhen` with **snapshot semantics**, and **tombstones** ✅  
-> Next steps are an API layer (HTTP/JSON) and concurrency (mutex) in **1D**.
+> **Status**  
+> ✅ Store layer (**1E**) complete: versions, TTL, CAS, append-only history, `GetWhen` snapshot semantics, tombstones.  
+> ✅ HTTP API built: PUT / GET / GET?at / DELETE / CAS / SWEEP.  
+> ⏭ Next (1D): add `RWMutex` for concurrency.
 
 ---
 
 ## Table of Contents
 
 1. [Quickstart](#quickstart)
-2. [Core Ideas](#core-ideas)
-3. [API Surface](#api-surface)
-4. [Data Model & Invariants](#data-model--invariants)
-5. [Semantics (with Examples)](#semantics-with-examples)
-   - [Set / SetWithTTL](#set--setwithttl)
-   - [Get (lazy delete)](#get-lazy-delete)
-   - [CAS (Compare-And-Set)](#cas-compare-and-set)
-   - [Delete (tombstones)](#delete-tombstones)
-   - [GetWhen (time travel)](#getwhen-time-travel)
-6. [Complexity](#complexity)
-7. [Thread Safety](#thread-safety)
-8. [Testing](#testing)
-9. [Design Decisions & Rationale](#design-decisions--rationale)
-10. [Common Questions (FAQ)](#common-questions-faq)
-11. [Extensibility & Roadmap](#extensibility--roadmap)
-12. [Project Structure](#project-structure)
-13. [Contributing](#contributing)
+2. [Features & Guarantees](#features--guarantees)
+3. [Run the Server](#run-the-server)
+4. [HTTP API](#http-api)
+   - [Conventions](#conventions)
+   - [DTO Schemas](#dto-schemas)
+   - [Endpoints](#endpoints)
+5. [Semantics & Examples](#semantics--examples)
+6. [Project Structure](#project-structure)
+7. [Testing](#testing)
+8. [Design Notes](#design-notes)
+9. [Roadmap](#roadmap)
+10. [FAQ](#faq)
 
 ---
 
 ## Quickstart
 
+```bash
+git clone <your-fork-or-repo>
+cd blinkdb
+go mod tidy
+go test ./...
+```
+
+**Store usage (in code):**
+
 ```go
 s := store.NewStore()
 
-// 1) Plain set
+// 1) Create
 e1 := s.Set("user:1", "Alice") // v1
 
 // 2) Update with TTL (expires in 2 minutes)
 e2 := s.SetWithTTL("user:1", "Alice*", 2*time.Minute) // v2
 
-// 3) CAS: only write if current value == "Alice*"
-ok := s.CAS("user:1", "Alice*", "Alice ✅") // v3 if ok==true
+// 3) CAS by version (preserves TTL)
+ok, e3 := s.CASVersion("user:1", e2.Version, "Alice ✅") // v3 if ok
 
-// 4) Read latest (honors TTL lazily on read)
-e, ok := s.Get("user:1")
+// 4) Read latest (lazy-deletes expired)
+cur, ok := s.Get("user:1")
 
-// 5) Time travel: “as of” a timestamp (snapshot semantics)
+// 5) Time travel (snapshot semantics)
 t := e2.UpdatedAt.Add(30 * time.Second)
-past, ok := s.GetWhen("user:1", t) // returns the version alive at time t
+past, ok := s.GetWhen("user:1", t)
 
-// 6) Delete (writes a tombstone into history)
+// 6) Delete (tombstone, version++)
 s.Delete("user:1")
 
-// 7) Time travel after delete → not found (delete is a barrier from that time on)
-_, ok = s.GetWhen("user:1", time.Now())
+// 7) Sweep expired (GC at “now”)
+n := s.SweepExpired()
 ```
 
 ---
 
-## Core Ideas
+## Features & Guarantees
 
-- **Live map** (`s.data`): holds only the _current_ version for each key.
-- **History** (`s.history[key]`): append‑only log of every successful write (Set / SetWithTTL / CAS) **and** delete (as a **tombstone**). It is **time‑ordered** by `UpdatedAt`.
-- **Snapshot semantics** for time travel: `GetWhen(key, t)` returns the most recent version with `UpdatedAt ≤ t` that was **alive at t** (i.e., no TTL or `ExpiresAt > t`). **Tombstones are barriers**: once a delete is recorded at/ before `t`, older values are not visible for that `t`.
-
----
-
-## API Surface
-
-```go
-// Construction
-func NewStore() *Store
-func NewStoreWithClock(c Clock) *Store // tests inject a fake clock
-
-// Basic ops
-func (s *Store) Set(key, value string) Entry
-func (s *Store) SetWithTTL(key, value string, ttl time.Duration) Entry
-func (s *Store) Get(key string) (Entry, bool)
-func (s *Store) Delete(key string) bool
-func (s *Store) CAS(key, expected, newValue string) bool
-
-// Introspection
-func (s *Store) Size() int
-func (s *Store) Keys() []string
-
-// Time & expiry
-func (s *Store) SweepExpired() int                        // bulk remove expired from live map
-func (s *Store) GetWhen(key string, t time.Time) (Entry, bool) // time travel
-```
-
-**Clock injection** (`Clock` interface) is used to make time deterministic in tests.
+- **Versioned writes**: monotonically increasing `Version` per key; tombstones also bump version.
+- **Time-travel** (`GetWhen`) with **snapshot semantics** and **delete barriers**.
+- **TTL** per write; **lazy expiry** on `Get` + **manual sweep** for GC.
+- **CAS by version**: `expectedVersion` → update or conflict (409). **TTL preserved** on success.
+- **Tombstones** on explicit delete (historical evidence of removal).
+- **RFC3339 UTC** timestamps in API responses.
 
 ---
 
-## Data Model & Invariants
+## Run the Server
 
-`Entry` (per version):
+> The HTTP router is in `internal/api/http.go`; server bootstrap in `cmd/server/main.go`.
 
-- `Value string` — the stored value (ignored for tombstones).
-- `CreatedAt time.Time` — creation time of this _lineage_ (never changes for a live lineage).
-- `UpdatedAt time.Time` — write time of this version (monotonic per key).
-- `ExpiresAt time.Time` — zero means no TTL; otherwise the version expires at `ExpiresAt`.
-- `Version int64` — strictly increases by **1** on each write **or** tombstone.
-- `Deleted bool` — `true` means **tombstone** (logical delete). Tombstones never live in `s.data`; they only appear in `s.history`.
-
-Store invariants:
-
-- `s.data[k]` holds **exactly one** live entry (or none) — the current snapshot.
-- `s.history[k]` is **append‑only**, time‑ordered by `UpdatedAt`. It includes:
-  - Every successful `Set`, `SetWithTTL`, `CAS` (with `Deleted=false`)
-  - Every successful `Delete` as a **tombstone** (`Deleted=true`, `ExpiresAt=zero`)
-- Versioning:
-  - If key exists in `s.data`, new version = `existing.Version + 1`
-  - If key absent but history exists, new version = `last(history[k]).Version + 1`
-  - If no history, new version = `1`
-
----
-
-## Semantics (with Examples)
-
-### Set / SetWithTTL
-
-- **Set**:
-
-  - New key → `Version=nextFromHistory`, `CreatedAt=UpdatedAt=now`, `ExpiresAt=zero`.
-  - Existing key → `Version++`, `CreatedAt` preserved, `UpdatedAt=now`, `ExpiresAt=zero` (clears TTL).
-  - Appends to history (`Deleted=false`) and updates live map.
-
-- **SetWithTTL**:
-  - Same version rules, but `ExpiresAt = now + ttl` (for `ttl > 0`).
-  - If `ttl <= 0`, it behaves like `Set`.
-
-**Example (TTL then Set):**
-
-```
-12:00 SetWithTTL("k","A", 3m)   -> v1, ExpiresAt=12:03
-12:05 Set("k","B")              -> v2, ExpiresAt=zero
-```
-
-At 12:02 → `GetWhen("k", 12:02) == "A"`  
-At 12:04 → `GetWhen("k", 12:04) == not found` (A expired, B not yet)  
-At 12:06 → `GetWhen("k", 12:06) == "B"`
-
----
-
-### Get (lazy delete)
-
-- Returns current live value if:
-  - No TTL, **or**
-  - TTL exists and `ExpiresAt > now`
-- If `ExpiresAt ≤ now` → removes it from `s.data` and returns `not found`.
-- Does **not** touch history.
-
----
-
-### CAS (Compare-And-Set)
-
-- Succeeds only if key exists, not expired **now**, and `current.Value == expected`.
-- On success:
-  - `Version++`, `UpdatedAt=now`, `CreatedAt` preserved.
-  - **TTL policy**: preserves existing TTL on CAS.
-  - Append to history, update live map.
-- On failure → no mutation.
-
----
-
-### Delete (tombstones)
-
-- If key **present**:
-
-  - Remove it from `s.data`.
-  - Append a **tombstone** to `history[key]`:
-    - `Deleted=true`, `ExpiresAt=zero`,
-    - `Version = prev.Version + 1`,
-    - `UpdatedAt = now`,
-    - `CreatedAt` carries lineage (chosen policy).
-  - Return `true`.
-
-- If key **missing** → return `false` (no new tombstone).
-
-**Idempotence:** repeated `Delete("k")` calls without an intervening `Set` append **only one** tombstone (the first call) and return `false` thereafter.
-
----
-
-### GetWhen (time travel)
-
-> “What did `key` look like **at time `t`**?”
-
-**Snapshot semantics:**
-
-- Pick the most recent version with `UpdatedAt ≤ t` that’s **alive at `t`**:
-  - Alive at `t` iff `ExpiresAt == zero` **or** `ExpiresAt > t`.
-  - If `ExpiresAt == t`, it’s **not** visible.
-- **Tombstone barrier:** if a `Deleted==true` entry has `UpdatedAt ≤ t`, older versions are **not** visible at/after that instant.
-
-**Search strategy:**  
-Binary search (upper bound of `t`) over `history[key]` by `UpdatedAt`, then scan left:
-
-- If you hit a tombstone `≤ t` → **stop** → not found.
-- Else, return first live version whose TTL is valid at `t`.
-- Complexity: `O(log N + K)`, where `K` is the number of skipped (expired‑by‑t) versions.
-
-**Illustrative timeline:**
-
-```
-12:00  Set("k","A")                 -> v1
-12:05  Delete("k")                  -> v2 (tombstone)
-12:07  Set("k","B")                 -> v3
-```
-
-- 12:04 → `GetWhen("k", 12:04) == "A"`
-- 12:05 → `GetWhen("k", 12:05) == not found` (tombstone at t)
-- 12:06 → `GetWhen("k", 12:06) == not found` (barrier still applies)
-- 12:07 → `GetWhen("k", 12:07) == "B"`
-- 12:09 → `GetWhen("k", 12:09) == "B"`
-
-**Same‑timestamp ties:** if multiple writes share the same `UpdatedAt`, append order wins. A `Delete` at the same timestamp as a `Set` makes `GetWhen(t)` return **not found** (delete wins).
-
----
-
-## Complexity
-
-- **Set / SetWithTTL / CAS / Delete**: amortized **O(1)** (map update + history append).
-- **Get**: **O(1)** (lazy TTL check).
-- **GetWhen**: **O(log N + K)** over `history[key]` (binary search + small left scan).
-- **SweepExpired**: **O(#live keys)** in the live map.
-
----
-
-## Thread Safety
-
-- The current store is **not** goroutine‑safe (by design for milestone 1x).
-- A mutex will arrive in “1D” to make operations atomic across readers/writers.
-- Until then, use this store **single‑threaded** or add your own external synchronization.
-
----
-
-## Testing
-
-The project uses a deterministic **Clock** interface to avoid flakey timing tests. A `FakeClock` + `NewStoreWithClock` let tests control time precisely.
-
-Tests cover:
-
-- **1A acceptance**: Set/Get/Delete/Size/Keys basics, versioning & timestamps.
-- **TTL behavior**: SetWithTTL, `Get` lazy delete, `SweepExpired`.
-- **CAS**: success/failure, TTL preservation policy.
-- **History**: append‑only, monotonic timestamps, versions.
-- **GetWhen**: snapshot semantics across normal writes, TTL, ties.
-- **Tombstones**: delete barrier in time travel, idempotent delete, recreate after delete, tombstone vs unexpired value.
-
-Run everything:
+Start (typical):
 
 ```bash
-go test ./...
+go run ./cmd/server
 ```
 
-> Tip: when asserting that `UpdatedAt` progresses, **advance the fake clock** between writes to avoid equal timestamps.
+Then hit (default router prefix):
+
+```
+PUT    /v1/kv/{key}
+GET    /v1/kv/{key}
+GET    /v1/kv/{key}?at=<RFC3339>
+POST   /v1/kv/{key}:cas
+DELETE /v1/kv/{key}
+POST   /v1/admin/sweep
+```
 
 ---
 
-## Design Decisions & Rationale
+## HTTP API
 
-- **History is source‑of‑truth for time travel.** We never reconstruct from `s.data`.
-- **Snapshot semantics** for `GetWhen`: reflects _state_ at `t`, not just “what has ever happened.”
-- **Tombstones** make deletes visible to time travel (and auditing).
-- **Lazy delete** in `Get`: keeps hot reads fast; expired entries vanish on access. `SweepExpired` provides a bulk cleanup.
-- **CAS TTL policy**: preserve existing TTL on CAS (choice is explicit in code & tests).
-- **Version monotonicity across tombstones**: after `A@v1`, `Del@v2`, the next `Set` is `v3`, not `v1`.
+### Conventions
+
+- **Content-Type**: `application/json` for all requests with a body and all responses.
+- **Timestamps**: RFC3339, always UTC (e.g., `2025-08-19T12:05:00Z`).
+- **Errors**: JSON envelope `{ "error": "<message>" }`.
+- **Status codes**:
+  - `201 Created` – new key via PUT
+  - `200 OK` – success (GET/PUT update/DELETE/CAS/SWEEP)
+  - `400 Bad Request` – invalid JSON, bad TTL combo, bad `at`/`expiresAt`, or unsupported `before`
+  - `404 Not Found` – key missing/expired/tombstoned (at the time of the request)
+  - `409 Conflict` – CAS version mismatch
+
+### DTO Schemas
+
+```json
+// EntryDTO (response)
+{
+  "key": "k",
+  "value": "v",              // omitted for tombstones
+  "version": 3,
+  "createdAt": "2025-08-19T12:00:00Z",
+  "updatedAt": "2025-08-19T12:05:00Z",
+  "expiresAt": "2025-08-19T12:10:00Z", // omitted if no TTL
+  "deleted": false
+}
+
+// PutValueRequest
+{
+  "value": "Alice",
+  "ttlSeconds": 120,         // optional; mutually exclusive with expiresAt
+  "expiresAt": "2025-08-19T12:10:00Z", // optional; mutually exclusive with ttlSeconds; must be in future
+  "clearTTL": false          // optional; if true, ignores ttlSeconds/expiresAt and clears TTL
+}
+
+// CASRequest
+{
+  "expectedVersion": 2,
+  "value": "Alice++"
+}
+
+// DeleteResponse
+{
+  "entry": {
+    "key": "k",
+    "version": 4,
+    "createdAt": "2025-08-19T12:00:00Z",
+    "updatedAt": "2025-08-19T12:07:00Z",
+    "deleted": true
+  }
+}
+
+// SweepRequest (NOTE: "before" is NOT supported; will 400 if provided)
+{ "before": "2025-08-19T13:00:00Z" }
+
+// SweepResponse
+{
+  "swept": 2,
+  "keys": ["k1","k2"]
+}
+
+// ErrorResponse
+{ "error": "not found" }
+```
+
+### Endpoints
+
+#### PUT `/v1/kv/{key}` — Create/Update with TTL rules
+
+- **Body**: `PutValueRequest`
+- **201** on create; **200** on update.
+- **TTL policy**:
+  - `clearTTL=true` → strip TTL
+  - `ttlSeconds` → set relative TTL
+  - `expiresAt` → set absolute TTL (future only)
+  - **none** → if key exists, **preserve existing TTL**; otherwise no TTL
+- **Errors**: `400` for bad JSON, invalid TTL combo, or past `expiresAt`.
+
+**Create:**
+
+```bash
+curl -s -X PUT 'http://localhost:8080/v1/kv/user:1'   -H 'Content-Type: application/json'   -d '{"value":"Alice"}'
+# 201 Created
+```
+
+**Update preserving TTL:**
+
+```bash
+# assume user:1 currently has a TTL
+curl -s -X PUT 'http://localhost:8080/v1/kv/user:1'   -H 'Content-Type: application/json'   -d '{"value":"Alice*"}'
+# 200 OK; expiresAt unchanged
+```
+
+**Set TTL (relative):**
+
+```bash
+curl -s -X PUT 'http://localhost:8080/v1/kv/user:1'   -H 'Content-Type: application/json'   -d '{"value":"Alice","ttlSeconds":90}'
+```
+
+**Set TTL (absolute):**
+
+```bash
+curl -s -X PUT 'http://localhost:8080/v1/kv/user:1'   -H 'Content-Type: application/json'   -d '{"value":"Alice","expiresAt":"2025-08-19T12:10:00Z"}'
+```
+
+**Clear TTL:**
+
+```bash
+curl -s -X PUT 'http://localhost:8080/v1/kv/user:1'   -H 'Content-Type: application/json'   -d '{"value":"Alice","clearTTL":true}'
+```
 
 ---
 
-## Common Questions (FAQ)
+#### GET `/v1/kv/{key}` — Read current value
 
-**Why is `CreatedAt` preserved on updates but “new” after a tombstoned delete?**  
-After a delete, we treat a subsequent `Set` as a **new lineage** (fresh `CreatedAt`). This matches many stores’ semantics and simplifies audits.
+- **200** with `EntryDTO` if present and not expired; **404** if missing/expired/tombstoned.
 
-**What if I want `GetWhen` to ignore deletes?**  
-That would be “audit” semantics. You could add `GetWhenIgnoringDeletes` that skips the tombstone barrier check.
+```bash
+curl -s 'http://localhost:8080/v1/kv/user:1'
+```
 
-**Does `GetWhen` ever mutate state?**  
-No. It is a pure read. It doesn’t lazy‑delete, and it never prunes history.
+#### GET `/v1/kv/{key}?at=<RFC3339>` — Time-travel read
 
-**How do equal timestamps behave?**  
-Append order wins. At the same `UpdatedAt`, the later appended entry is considered “later.”
+- **200** with `EntryDTO` for the version **visible at `at`**.
+- **404** if no version is alive at `at` (including delete barrier).
+- **400** for bad time format.
+
+```bash
+curl -s 'http://localhost:8080/v1/kv/user:1?at=2025-08-19T12:05:00Z'
+```
 
 ---
 
-## Extensibility & Roadmap
+#### POST `/v1/kv/{key}:cas` — Compare-and-Swap (by version)
 
-What’s next (pick & choose):
+- **Body**: `CASRequest { expectedVersion, value }`
+- **200** on success (version++, TTL preserved).
+- **409** if `expectedVersion` doesn’t match current live version.
+- **404** if the key is missing/expired/tombstoned at “now”.
+- **400** on bad JSON or missing value.
 
-1. **1D — Concurrency & Atomics**
+```bash
+curl -s -X POST 'http://localhost:8080/v1/kv/user:1:cas'   -H 'Content-Type: application/json'   -d '{"expectedVersion":2,"value":"Alice++"}'
+```
 
-   - Add a `sync.RWMutex` to `Store`.
-   - Make all methods safe for concurrent use.
-   - Consider write batching or atomic multi‑ops if needed.
+---
 
-2. **APIs (Service Layer)**
+#### DELETE `/v1/kv/{key}` — Delete with tombstone
 
-   - **HTTP/JSON** endpoints around the store:
-     - `PUT /kv/{key}` with optional `ttl`
-     - `GET /kv/{key}`
-     - `DELETE /kv/{key}`
-     - `POST /kv/{key}:cas` (`expected`, `newValue`)
-     - `GET /kv/{key}:at?t=RFC3339`
-     - Admin: `POST /maintenance/sweep-expired`
-   - Validation, error mapping, idempotency, tracing.
+- **200** with a **tombstone view** (Deleted=true, Version=prev+1).
+- **404** if key is already missing/expired/tombstoned.
 
-3. **Background Sweeper**
+```bash
+curl -s -X DELETE 'http://localhost:8080/v1/kv/user:1'
+```
 
-   - Optional goroutine to periodically call `SweepExpired()`.
+---
 
-4. **History Inspection**
+#### POST `/v1/admin/sweep` — GC expired keys (at “now”)
 
-   - `ListHistory(key, limit, beforeTime)` for debugging.
-   - Exporters (JSON/NDJSON) for audits.
+- **No body** (or empty body).
+- Runs `SweepExpired()` using the store’s clock; **does not** write tombstones.
+- Responds with `{swept, keys}` — keys removed by the sweep.
+- **400** if a `before` field is provided (unsupported).
 
-5. **Compaction / Retention**
+```bash
+curl -s -X POST 'http://localhost:8080/v1/admin/sweep'
+```
 
-   - Cap history by count or time window.
-   - Optional snapshotting to disk.
+---
 
-6. **Persistence**
+## Semantics & Examples
 
-   - Pluggable storage engine (boltDB, Badger, SQLite, Pebble).
-   - WAL + checkpointing; recover on restart.
+- **Lazy expiry on GET**: if `ExpiresAt ≤ now`, the key is evicted from the live map and GET returns `404`. History is untouched.
+- **Sweep**: bulk GC for expired entries at **now**; returns how many and which keys were removed; **no tombstones**.
+- **Time-travel (`?at=`)**:
+  - Picks the most recent version with `UpdatedAt ≤ at` that’s **alive at `at`** (no TTL or `ExpiresAt > at`).
+  - **Delete barrier**: a tombstone at/≤`at` hides earlier values.
+  - Ties on `UpdatedAt` are resolved by append order; a same-timestamp delete wins over a set.
 
-7. **Metrics & Tracing**
-   - Counters for hits/misses, CAS success rate, sweeps, expirations.
-   - OpenTelemetry spans for hot paths.
+**Mini timeline (delete barrier):**
+
+```
+12:00  Set(k,"A")        -> v1
+12:05  Delete(k)         -> v2 (tombstone)
+12:07  Set(k,"B")        -> v3
+
+GET k?at=12:04Z  -> "A"
+GET k?at=12:05Z  -> 404 (delete at t)
+GET k?at=12:06Z  -> 404
+GET k?at=12:07Z  -> "B"
+```
+
+**TTL example:**
+
+```
+12:00  SetWithTTL(k,"A", 3m) -> v1, ExpiresAt=12:03
+12:02  GET k?at=12:02Z       -> "A"
+12:03  GET k?at=12:03Z       -> 404 (boundary not visible)
+12:05  Set(k,"B")            -> v2, no TTL
+12:06  GET k?at=12:06Z       -> "B"
+```
 
 ---
 
 ## Project Structure
 
 ```
-/store
-  store.go            # Store, Entry invariants, methods
-  ..._test.go         # Test suites (acceptance, TTL, CAS, GetWhen, tombstones)
-  README.md           # This file
+.
+├── LICENSE
+├── ReadMe.md
+├── cmd
+│   └── server
+│       └── main.go
+├── docs
+│   ├── api.md
+│   ├── design.md
+│   └── perf.md
+├── go.mod
+├── internal
+│   ├── api
+│   │   ├── api_test.go       # API handler tests (table-driven)
+│   │   ├── dto.go            # JSON DTOs (EntryDTO, PutValueRequest, etc.)
+│   │   ├── handlers.go       # PUT/GET/GET?at/CAS/DELETE/SWEEP
+│   │   └── http.go           # router wiring & server
+│   ├── config
+│   │   └── config.go
+│   ├── observability
+│   │   ├── health.go
+│   │   ├── logging.go
+│   │   └── metrics.go
+│   └── store
+│       ├── entry.go          # Entry type & helpers
+│       ├── errors.go
+│       ├── store.go          # Store logic, history, TTL, GetWhen, SweepExpired
+│       └── store_test.go     # Store unit tests (acceptance, TTL, CAS, GetWhen)
+├── main
+└── scripts
 ```
-
-(If you add an API layer, consider `/cmd/server` and `/internal/http` packages.)
 
 ---
 
-## Contributing
+## Testing
 
-- Keep behavior **documented and tested**. If you change a policy (e.g., CAS TTL), update both docs and tests.
-- Prefer small, reviewable PRs (like the micro‑tasks you used here).
-- If you add public APIs, include examples in this README.
+Run all tests:
+
+```bash
+go test ./...
+```
+
+API-only tests:
+
+```bash
+go test ./internal/api -v
+```
+
+(After 1D) Run with race detector:
+
+```bash
+go test -race ./...
+```
+
+---
+
+## Design Notes
+
+- **History is the source of truth** for time travel; the live map is a cache of “now.”
+- **Snapshot semantics** make `GetWhen` predictable and auditable.
+- **Tombstones** ensure deletes are visible in history and act as time-travel barriers.
+- **CAS preserves TTL** by design (clearly tested & documented).
+- **Lazy vs eager expiry**: we chose lazy expiry on reads for hot-path simplicity; `SweepExpired` provides explicit cleanup.
+
+---
+
+## Roadmap
+
+- **1D**: Add `sync.RWMutex` to make the store goroutine-safe; audit lazy-delete path under locks; add concurrency tests.
+- **Background sweeper**: optional goroutine to call `SweepExpired()` periodically.
+- **History inspection**: paged history export / debug endpoints.
+- **Persistence**: optional WAL/snapshots or pluggable engines (Bolt/Badger/Pebble).
+- **Metrics**: hit/miss, expirations, CAS success rate, sweep counts; tracing with OpenTelemetry.
+
+---
+
+## FAQ
+
+**Why does DELETE return a tombstone view?**  
+So clients can observe the new version (version++), the delete time, and confirm lineage.
+
+**Why does SWEEP not write tombstones?**  
+Sweep is GC for expired entries, not a user-intent delete. It only affects the live map.
+
+**What happens if TTL expires exactly at `at`?**  
+Boundary is **not visible**: `ExpiresAt == at` → considered expired for `GetWhen`.
+
+**Can I sweep at a specific `before` time?**  
+Not in v1. The endpoint runs GC at “now”. If needed, add a `SweepExpiredBefore(t)` store API and wire it into HTTP later.
+
+---
+
+Happy hacking! If you change a behavior (e.g., CAS TTL policy), please update both tests and this README to keep them aligned.
