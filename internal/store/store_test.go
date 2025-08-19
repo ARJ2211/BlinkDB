@@ -571,3 +571,134 @@ func TestGet_AfterLazyDelete_SetRecreatesCleanly(t *testing.T) {
 		t.Fatalf("expected zero ExpiresAt on recreated entry, got %v", g.ExpiresAt)
 	}
 }
+
+func TestGetWhen_BasicHistory(t *testing.T) {
+	t0 := time.Date(2025, 8, 19, 12, 0, 0, 0, time.UTC)
+	s, fc := newTestStoreAt(t, t0)
+
+	eA := s.Set("k", "A") // 12:00
+	advance(fc, 5*time.Minute)
+	eB := s.Set("k", "B") // 12:05
+	advance(fc, 5*time.Minute)
+	eC := s.Set("k", "C") // 12:10
+
+	// before first write
+	if _, ok := s.GetWhen("k", t0.Add(-time.Minute)); ok {
+		t.Fatalf("expected not found before first write")
+	}
+
+	// exactly at A
+	v, ok := s.GetWhen("k", eA.UpdatedAt)
+	if !ok || v.Value != "A" || v.Version != 1 {
+		t.Fatalf("expected A@v1 at A time, got (%q,v%d,ok=%v)", v.Value, v.Version, ok)
+	}
+
+	// between B and C (12:07)
+	v, ok = s.GetWhen("k", eB.UpdatedAt.Add(2*time.Minute))
+	if !ok || v.Value != "B" || v.Version != 2 {
+		t.Fatalf("expected B@v2 at 12:07, got (%q,v%d,ok=%v)", v.Value, v.Version, ok)
+	}
+
+	// long after C
+	v, ok = s.GetWhen("k", eC.UpdatedAt.Add(10*time.Hour))
+	if !ok || v.Value != "C" || v.Version != 3 {
+		t.Fatalf("expected C@v3 long after C, got (%q,v%d,ok=%v)", v.Value, v.Version, ok)
+	}
+}
+
+func TestGetWhen_RespectsTTLAtTimeT(t *testing.T) {
+	t0 := time.Date(2025, 8, 19, 12, 0, 0, 0, time.UTC)
+	s, fc := newTestStoreAt(t, t0)
+
+	// A at 12:00, TTL 3m (expires 12:03)
+	eA := s.SetWithTTL("k", "A", 3*time.Minute)
+	if eA.ExpiresAt.IsZero() {
+		t.Fatalf("precondition: expected non-zero ExpiresAt for A")
+	}
+
+	// Before expiry → A
+	v, ok := s.GetWhen("k", t0.Add(2*time.Minute)) // 12:02
+	if !ok || v.Value != "A" {
+		t.Fatalf("expected A at 12:02, got (%q, ok=%v)", v.Value, ok)
+	}
+
+	// At expiry boundary → not found
+	if _, ok := s.GetWhen("k", t0.Add(3*time.Minute)); ok { // 12:03
+		t.Fatalf("expected not found at exact expiry")
+	}
+
+	// After expiry but before B → not found
+	if _, ok := s.GetWhen("k", t0.Add(4*time.Minute)); ok { // 12:04
+		t.Fatalf("expected not found between A expiry and B write")
+	}
+
+	// Write B at 12:05 (no TTL)
+	advance(fc, 5*time.Minute) // move clock to ~12:05
+	eB := s.Set("k", "B")
+
+	// After B → B
+	v, ok = s.GetWhen("k", eB.UpdatedAt.Add(time.Minute)) // 12:06
+	if !ok || v.Value != "B" {
+		t.Fatalf("expected B at 12:06, got (%q, ok=%v)", v.Value, ok)
+	}
+}
+
+func TestGetWhen_DoesNotMutateState(t *testing.T) {
+	t0 := time.Date(2025, 8, 19, 12, 0, 0, 0, time.UTC)
+	s, fc := newTestStoreAt(t, t0)
+
+	_ = s.Set("k", "A")
+	advance(fc, time.Minute)
+	_ = s.Set("k", "B")
+
+	// capture state
+	beforeHist := len(s.history["k"])
+	beforeLive, liveOK := s.Get("k")
+
+	// perform time-travel reads at different times
+	_, _ = s.GetWhen("k", t0.Add(30*time.Second)) // should be A
+	_, _ = s.GetWhen("k", t0.Add(2*time.Minute))  // should be B
+
+	// ensure history unchanged
+	if got := len(s.history["k"]); got != beforeHist {
+		t.Fatalf("GetWhen must not mutate history; before=%d after=%d", beforeHist, got)
+	}
+	// ensure live map unchanged
+	afterLive, afterOK := s.Get("k")
+	if liveOK != afterOK || beforeLive != afterLive {
+		t.Fatalf("GetWhen must not mutate live data; before=%+v ok=%v, after=%+v ok=%v",
+			beforeLive, liveOK, afterLive, afterOK)
+	}
+}
+
+func TestGetWhen_TiesByTimestamp_UsesLatestAppended(t *testing.T) {
+	t0 := time.Date(2025, 8, 19, 12, 0, 0, 0, time.UTC)
+	s, _ := newTestStoreAt(t, t0)
+
+	// Two writes at identical UpdatedAt (no clock advance)
+	e1 := s.Set("k", "A") // v1 @ t0
+	e2 := s.Set("k", "B") // v2 @ t0 (same UpdatedAt as e1)
+
+	// At exactly t0, should pick the last appended version (B@v2)
+	v, ok := s.GetWhen("k", e1.UpdatedAt)
+	if !ok {
+		t.Fatalf("expected a value at exact timestamp")
+	}
+	if v.Value != "B" || v.Version != 2 {
+		t.Fatalf("expected latest appended at same timestamp (B,v2), got (%q,v%d)", v.Value, v.Version)
+	}
+
+	// Sanity: at a much later time, still B (latest as of then)
+	v, ok = s.GetWhen("k", e2.UpdatedAt.Add(time.Minute))
+	if !ok || v.Value != "B" {
+		t.Fatalf("expected B after, got (%q, ok=%v)", v.Value, ok)
+	}
+}
+
+func TestGetWhen_MissingKey(t *testing.T) {
+	t0 := time.Date(2025, 8, 19, 12, 0, 0, 0, time.UTC)
+	s, _ := newTestStoreAt(t, t0)
+	if _, ok := s.GetWhen("missing", t0); ok {
+		t.Fatalf("expected missing key to return ok=false")
+	}
+}

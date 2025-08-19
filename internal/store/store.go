@@ -1,6 +1,8 @@
 package store
 
-import "time"
+import (
+	"time"
+)
 
 // Clock is an abstraction of time so we can substitute a fake clock in tests.
 // In production we use RealClock (which wraps time.Now).
@@ -210,4 +212,36 @@ func (s *Store) SweepExpired() int {
 		}
 	}
 	return removed
+}
+
+// GetWhen returns the latest version whose UpdatedAt <= t AND is alive at t.
+// Snapshot semantics: ExpiresAt must be zero or strictly > t.
+// Pure read: does not touch s.data or s.history.
+func (s *Store) GetWhen(key string, t time.Time) (Entry, bool) {
+	ents, ok := s.history[key]
+	if !ok || len(ents) == 0 {
+		return Entry{}, false
+	}
+
+	// Find first UpdatedAt > t (linear scan version)
+	idx := len(ents) // <- default: nothing > t
+	for i := range ents {
+		if ents[i].UpdatedAt.After(t) {
+			idx = i
+			break
+		}
+	}
+	// t is before the first write
+	if idx == 0 {
+		return Entry{}, false
+	}
+
+	// Walk left to find the latest version alive at t
+	for i := idx - 1; i >= 0; i-- {
+		e := ents[i]
+		if e.ExpiresAt.IsZero() || e.ExpiresAt.After(t) {
+			return e, true
+		}
+	}
+	return Entry{}, false
 }
