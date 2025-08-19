@@ -6,3 +6,12 @@
 // - expiresAt: (reserved for later TTL milestones; unused in 1A)
 
 package store
+
+import "time"
+
+type Entry struct {
+	value     string
+	createdAt time.Time
+	updatedAt time.Time
+	version   uint64
+}
