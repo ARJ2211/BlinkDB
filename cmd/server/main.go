@@ -7,25 +7,25 @@ import (
 )
 
 func main() {
-	// 1) create a request router (a multiplexer)
-	mux := http.NewServeMux()
+	// demo: use the in-memory store
+	// s := store.NewStore()
 
-	// 2) register one route for health checks
+	// e1 := s.Set("u1", "A")
+	// fmt.Println("Set u1=A ->", e1.Value(), e1.Version(), e1.CreatedAt(), e1.UpdatedAt())
+
+	// e2 := s.Set("u1", "B")
+	// fmt.Println("Set u1=B ->", e2.Value(), e2.Version(), e2.CreatedAt(), e2.UpdatedAt())
+
+	// minimal HTTP server with health endpoint
+	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		// Write plain text "ok" back to the client
-		fmt.Printf("%v: /healthz -> ok\n", time.Now())
-		fmt.Fprint(w, "OK!\n")
+		fmt.Printf("%v /healthz -> OK\n", time.Now())
+		fmt.Fprintln(w, "OK")
 	})
 
-	// 3) choose an address to listen on
 	addr := ":8080"
-
-	// 4) print a helpful startup message to your terminal
 	fmt.Println("BlinkDB server listening on", addr)
-
-	// 5) start the HTTP server (this blocks until the program stops or errors)
 	if err := http.ListenAndServe(addr, mux); err != nil {
-		// If the server fails to start (e.g., port in use), crash with the error
 		panic(err)
 	}
 }

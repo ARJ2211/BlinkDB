@@ -25,31 +25,36 @@ type Store struct {
 	data map[string]Entry
 }
 
+func NewStore() *Store {
+	data := make(map[string]Entry)
+	s := Store{
+		data: data,
+	}
+	return &s
+}
+
 func (s *Store) Set(key string, value string) Entry {
-	// If the key already exists in the store,
-	// then return the existing one for now
-	// TODO: IMPLEMENT UPDATE PATH LATER
+	now := time.Now()
+
 	if existing, ok := s.data[key]; ok {
-		return existing
+		// Existing key: bump version, update time, keep createdAt
+		newEntry := Entry{
+			value:     value,
+			createdAt: existing.createdAt,
+			updatedAt: now,
+			version:   existing.version + 1,
+		}
+		s.data[key] = newEntry
+		return newEntry
 	}
 
-	now := time.Now()
-	e := Entry{
+	// New key: version 1, createdAt = updatedAt = now
+	newEntry := Entry{
 		value:     value,
 		createdAt: now,
 		updatedAt: now,
 		version:   1,
 	}
-	s.data[key] = e
-	return e
-}
-
-func NewStore() *Store {
-	// Create an empty store and return the
-	// pointer.
-	m := make(map[string]Entry)
-	s := Store{
-		data: m,
-	}
-	return &s
+	s.data[key] = newEntry
+	return newEntry
 }
