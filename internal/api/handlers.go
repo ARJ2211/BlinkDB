@@ -2,6 +2,8 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"time"
 
@@ -220,6 +222,50 @@ func (srv *Server) DeleteValue(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, DeleteResponse{Entry: dto})
 }
 
+// POST /v1/admin/sweep
+// Request: { "before": "RFC3339" }  -> NOT supported (return 400)
+// Behavior: sweep at "now" using store.SweepExpired(); returns how many and which keys were removed.
+// Response: { "swept": <int>, "keys": ["k1", "k2", ...] }
 func (srv *Server) SweepExpired(w http.ResponseWriter, r *http.Request) {
-	writeError(w, http.StatusNotImplemented, "not implemented")
+	var req SweepRequest
+	if r.Body != nil {
+		// Accept empty body (EOF). Real JSON errors -> 400.
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			writeError(w, http.StatusBadRequest, "bad JSON body")
+			return
+		}
+	}
+
+	// v1: we only support sweeping "now" (store.SweepExpired); explicit 'before' is not supported.
+	if req.Before != "" {
+		writeError(w, http.StatusBadRequest, "before is not supported")
+		return
+	}
+
+	// Keys before sweep
+	before := srv.S.Keys()
+	beforeSet := make(map[string]struct{}, len(before))
+	for _, k := range before {
+		beforeSet[k] = struct{}{}
+	}
+
+	// Perform sweep at now (uses store clock)
+	n := srv.S.SweepExpired()
+
+	// Keys after sweep
+	after := srv.S.Keys()
+	afterSet := make(map[string]struct{}, len(after))
+	for _, k := range after {
+		afterSet[k] = struct{}{}
+	}
+
+	// Compute removed = before \ after
+	removed := make([]string, 0, n)
+	for k := range beforeSet {
+		if _, still := afterSet[k]; !still {
+			removed = append(removed, k)
+		}
+	}
+
+	writeJSON(w, http.StatusOK, SweepResponse{Swept: n, Keys: removed})
 }

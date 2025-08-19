@@ -448,6 +448,135 @@ func TestCAS_BadJSON_400(t *testing.T) {
 		t.Fatalf("status=%d, want 400", rec.Code)
 	}
 }
+func TestSWEEP_ExpiredKeys_Tombstoned_200(t *testing.T) { // you can rename to _Removed_ if you want
+	t0 := time.Date(2025, 8, 19, 12, 0, 0, 0, time.UTC)
+	st, router, fc := newTestHTTPWithClock(t, t0)
+
+	// k1 @ +1s, k2 @ +2s, k3 no TTL
+	st.SetWithTTL("k1", "A", 1*time.Second)
+	st.SetWithTTL("k2", "B", 2*time.Second)
+	st.Set("k3", "C")
+
+	// make them expired "now"
+	fc.now = fc.now.Add(2 * time.Second)
+
+	// sweep at now (no body)
+	req := httptest.NewRequest(http.MethodPost, "/v1/admin/sweep", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200", rec.Code)
+	}
+	var got SweepResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Swept != 2 {
+		t.Fatalf("swept=%d, want 2", got.Swept)
+	}
+	if !hasAll(got.Keys, "k1", "k2") {
+		t.Fatalf("keys should include k1,k2; got %v", got.Keys)
+	}
+
+	// GET checks: k1,k2 gone; k3 present
+	for _, k := range []string{"k1", "k2"} {
+		reqG := httptest.NewRequest(http.MethodGet, "/v1/kv/"+k, nil)
+		recG := httptest.NewRecorder()
+		router.ServeHTTP(recG, reqG)
+		if recG.Code != http.StatusNotFound {
+			t.Fatalf("GET %s after sweep status=%d, want 404", k, recG.Code)
+		}
+	}
+	reqG3 := httptest.NewRequest(http.MethodGet, "/v1/kv/k3", nil)
+	recG3 := httptest.NewRecorder()
+	router.ServeHTTP(recG3, reqG3)
+	if recG3.Code != http.StatusOK {
+		t.Fatalf("GET k3 after sweep status=%d, want 200", recG3.Code)
+	}
+}
+
+func TestSWEEP_NoBody_DefaultNow_NoOp(t *testing.T) {
+	// No keys expired at now => sweep 0
+	t0 := time.Date(2025, 8, 19, 12, 0, 0, 0, time.UTC)
+	st, router := newTestHTTP(t, t0)
+
+	st.SetWithTTL("far", "X", 1*time.Hour)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/admin/sweep", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200", rec.Code)
+	}
+	var got SweepResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	if got.Swept != 0 || len(got.Keys) != 0 {
+		t.Fatalf("expected no-op sweep, got %+v", got)
+	}
+}
+
+func TestSWEEP_ExpiredKeys_Removed_200(t *testing.T) {
+	t0 := time.Date(2025, 8, 19, 12, 0, 0, 0, time.UTC)
+	st, router, fc := newTestHTTPWithClock(t, t0)
+
+	// k1 expires at t0+1s, k2 at t0+2s, k3 no TTL
+	st.SetWithTTL("k1", "A", 1*time.Second)
+	st.SetWithTTL("k2", "B", 2*time.Second)
+	st.Set("k3", "C")
+
+	// move clock to t0+2s so k1 and k2 are expired "now"
+	fc.now = fc.now.Add(2 * time.Second)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/admin/sweep", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200", rec.Code)
+	}
+	var got SweepResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Swept != 2 {
+		t.Fatalf("swept=%d, want 2", got.Swept)
+	}
+	if !hasAll(got.Keys, "k1", "k2") {
+		t.Fatalf("keys should include k1,k2; got %v", got.Keys)
+	}
+
+	// confirm GET now returns 404 for k1 and k2; k3 still present
+	for _, k := range []string{"k1", "k2"} {
+		reqG := httptest.NewRequest(http.MethodGet, "/v1/kv/"+k, nil)
+		recG := httptest.NewRecorder()
+		router.ServeHTTP(recG, reqG)
+		if recG.Code != http.StatusNotFound {
+			t.Fatalf("GET %s after sweep status=%d, want 404", k, recG.Code)
+		}
+	}
+	reqG3 := httptest.NewRequest(http.MethodGet, "/v1/kv/k3", nil)
+	recG3 := httptest.NewRecorder()
+	router.ServeHTTP(recG3, reqG3)
+	if recG3.Code != http.StatusOK {
+		t.Fatalf("GET k3 after sweep status=%d, want 200", recG3.Code)
+	}
+}
+
+func TestSWEEP_Before_NotSupported_400(t *testing.T) {
+	_, router := newTestHTTP(t, time.Now().UTC())
+
+	body := mustJSON(t, SweepRequest{Before: time.Now().UTC().Format(time.RFC3339)})
+	req := httptest.NewRequest(http.MethodPost, "/v1/admin/sweep", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400", rec.Code)
+	}
+}
 
 // --- helpers ---
 

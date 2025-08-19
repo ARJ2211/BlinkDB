@@ -32,3 +32,17 @@ func getKey(r *http.Request) (string, bool) {
 	rest = strings.TrimSuffix(rest, ":cas")
 	return rest, true
 }
+
+// hasAll reports whether 'have' contains every key in 'want' (order ignored).
+func hasAll(have []string, want ...string) bool {
+	set := make(map[string]struct{}, len(have))
+	for _, k := range have {
+		set[k] = struct{}{}
+	}
+	for _, w := range want {
+		if _, ok := set[w]; !ok {
+			return false
+		}
+	}
+	return true
+}
