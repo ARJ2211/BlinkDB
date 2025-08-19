@@ -42,8 +42,16 @@ func NewStore() *Store {
 
 // GET THE ENTRY FROM THE STORE BASED ON THE KEY
 func (s *Store) Get(key string) (Entry, bool) {
+	n := s.Clock.Now()
 	if entry, ok := s.data[key]; ok {
-		return entry, true
+		if entry.ExpiresAt.IsZero() {
+			return entry, ok
+		} else if entry.ExpiresAt.Before(n) || entry.ExpiresAt.Equal(n) {
+			delete(s.data, key)
+			return Entry{}, false
+		} else {
+			return entry, true
+		}
 	}
 	return Entry{}, false
 }
