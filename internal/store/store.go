@@ -25,6 +25,7 @@ type Store struct {
 	data map[string]Entry
 }
 
+// CREATE A NEW STORE
 func NewStore() *Store {
 	data := make(map[string]Entry)
 	s := Store{
@@ -33,16 +34,25 @@ func NewStore() *Store {
 	return &s
 }
 
+// GET THE ENTRY FROM THE STORE BASED ON THE KEY
+func (s *Store) Get(key string) (Entry, bool) {
+	if entry, ok := s.data[key]; ok {
+		return entry, true
+	}
+	return Entry{}, false
+}
+
+// SET THE KEY IN THE STORE, IF KEY IN STORE UPDATE
 func (s *Store) Set(key string, value string) Entry {
 	now := time.Now()
 
 	if existing, ok := s.data[key]; ok {
 		// Existing key: bump version, update time, keep createdAt
 		newEntry := Entry{
-			value:     value,
-			createdAt: existing.createdAt,
-			updatedAt: now,
-			version:   existing.version + 1,
+			Value:     value,
+			CreatedAt: existing.CreatedAt,
+			UpdatedAt: now,
+			Version:   existing.Version + 1,
 		}
 		s.data[key] = newEntry
 		return newEntry
@@ -50,10 +60,10 @@ func (s *Store) Set(key string, value string) Entry {
 
 	// New key: version 1, createdAt = updatedAt = now
 	newEntry := Entry{
-		value:     value,
-		createdAt: now,
-		updatedAt: now,
-		version:   1,
+		Value:     value,
+		CreatedAt: now,
+		UpdatedAt: now,
+		Version:   1,
 	}
 	s.data[key] = newEntry
 	return newEntry

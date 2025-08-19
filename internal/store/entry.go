@@ -10,14 +10,8 @@ package store
 import "time"
 
 type Entry struct {
-	value     string
-	createdAt time.Time
-	updatedAt time.Time
-	version   uint64
+	Value     string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+	Version   uint64
 }
-
-// Getters (exported so other packages can read values)
-func (e Entry) Value() string        { return e.value }
-func (e Entry) CreatedAt() time.Time { return e.createdAt }
-func (e Entry) UpdatedAt() time.Time { return e.updatedAt }
-func (e Entry) Version() uint64      { return e.version }
