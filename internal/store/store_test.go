@@ -1,30 +1,13 @@
-// 1A acceptance checks (no code yet)
+// internal/store/store_1a_test.go
+// 1A acceptance checks
 //
 // A) First write creates version 1
-// - Set("u1", "A")
-// - Get("u1") => value="A", version=1
-// - createdAt == updatedAt (roughly equal, non-zero)
-//
 // B) Second write bumps version and updatedAt
-// - Set("u1", "B")
-// - Get("u1") => value="B", version=2
-// - createdAt unchanged; updatedAt > previous updatedAt
-//
 // C) Get missing key
-// - Get("missing") => found=false
-//
 // D) Delete existing key
-// - Delete("u1") => true
-// - Get("u1") => found=false
-//
 // E) Delete missing key is idempotent
-// - Delete("u1") => false
-//
 // F) Size reflects live keys
-// - After inserting k1,k2 and deleting k1 => Size()==1
-//
-// G) (Optional) Keys has exactly current keys; order not asserted
-// - Insert k1,k2; Keys() contains both; no duplicates
+// G) Keys has exactly current keys; order not asserted
 
 package store
 
@@ -62,17 +45,23 @@ func containsAll(have []string, want []string) bool {
 	return true
 }
 
-func newTestStoreWithClock(t *testing.T, t0 time.Time) (*Store, *time.Time) {
-	t.Helper()
-	s := NewStore()
-	// We chose to keep Clock public in this project
-	current := t0
-	s.Clock.Now = func() time.Time { return current }
-	return s, &current
+// FakeClock lets tests control time deterministically.
+type FakeClock struct {
+	now time.Time
 }
 
-func advance(current *time.Time, d time.Duration) {
-	*current = current.Add(d)
+func (fc *FakeClock) Now() time.Time          { return fc.now }
+func (fc *FakeClock) Advance(d time.Duration) { fc.now = fc.now.Add(d) }
+
+func newTestStoreAt(t *testing.T, t0 time.Time) (*Store, *FakeClock) {
+	t.Helper()
+	fc := &FakeClock{now: t0}
+	s := NewStoreWithClock(fc)
+	return s, fc
+}
+
+func advance(fc *FakeClock, d time.Duration) {
+	fc.Advance(d)
 }
 
 // --- tests ---
@@ -222,11 +211,11 @@ func TestCAS_SuccessAndFail(t *testing.T) {
 
 func TestGet_NotExpired_ReturnsEntry(t *testing.T) {
 	t0 := time.Unix(1_700_000_000, 0).UTC()
-	s, now := newTestStoreWithClock(t, t0)
+	s, fc := newTestStoreAt(t, t0)
 
 	s.SetWithTTL("k", "A", 10*time.Second) // expires at t0+10s
 
-	advance(now, 9*time.Second) // before expiry
+	advance(fc, 9*time.Second) // before expiry
 	e, ok := s.Get("k")
 	if !ok {
 		t.Fatalf("expected key present before expiry")
@@ -242,11 +231,11 @@ func TestGet_NotExpired_ReturnsEntry(t *testing.T) {
 
 func TestGet_Expired_IsDeletedAndNotFound(t *testing.T) {
 	t0 := time.Unix(1_700_000_000, 0).UTC()
-	s, now := newTestStoreWithClock(t, t0)
+	s, fc := newTestStoreAt(t, t0)
 
 	s.SetWithTTL("k", "A", 3*time.Second) // expires at t0+3s
 
-	advance(now, 3*time.Second) // at expiry boundary
+	advance(fc, 3*time.Second) // at expiry boundary
 
 	// First Get should lazily delete and report not found
 	if _, ok := s.Get("k"); ok {
@@ -261,11 +250,11 @@ func TestGet_Expired_IsDeletedAndNotFound(t *testing.T) {
 
 func TestGet_OverwriteExpiredKey_WorksNormally(t *testing.T) {
 	t0 := time.Unix(1_700_000_000, 0).UTC()
-	s, now := newTestStoreWithClock(t, t0)
+	s, fc := newTestStoreAt(t, t0)
 
 	s.SetWithTTL("k", "A", 1*time.Second)
 
-	advance(now, 2*time.Second) // now expired
+	advance(fc, 2*time.Second) // now expired
 	if _, ok := s.Get("k"); ok {
 		t.Fatalf("expected not found after expiry and lazy delete")
 	}
@@ -286,14 +275,14 @@ func TestGet_OverwriteExpiredKey_WorksNormally(t *testing.T) {
 
 func TestSweepExpired_RemovesOnlyExpired(t *testing.T) {
 	t0 := time.Unix(1_700_000_000, 0).UTC()
-	s, now := newTestStoreWithClock(t, t0)
+	s, fc := newTestStoreAt(t, t0)
 
 	// Set two keys, one short TTL, one long TTL
 	s.SetWithTTL("short", "A", 2*time.Second) // expires at t0+2s
 	s.SetWithTTL("long", "B", 20*time.Second) // expires at t0+20s
 
 	// Advance just past the short expiry
-	advance(now, 3*time.Second)
+	advance(fc, 3*time.Second)
 
 	removed := s.SweepExpired()
 	if removed != 1 {
@@ -314,5 +303,54 @@ func TestSweepExpired_RemovesOnlyExpired(t *testing.T) {
 	removed2 := s.SweepExpired()
 	if removed2 != 0 {
 		t.Fatalf("expected 0 keys removed on second sweep, got %d", removed2)
+	}
+}
+
+func TestNewStore_InitializesMaps(t *testing.T) {
+	s := NewStore()
+	if s == nil {
+		t.Fatal("NewStore returned nil")
+	}
+	if s.data == nil {
+		t.Fatal("data map is nil")
+	}
+	if s.history == nil {
+		t.Fatal("history map is nil")
+	}
+	if got := len(s.data); got != 0 {
+		t.Fatalf("expected data to be empty, got %d", got)
+	}
+	if got := len(s.history); got != 0 {
+		t.Fatalf("expected history to be empty, got %d", got)
+	}
+}
+
+func TestNewStore_ClockIsSet(t *testing.T) {
+	s := NewStore()
+	now := s.Clock.Now()
+	if now.IsZero() {
+		t.Fatal("Clock.Now returned zero time")
+	}
+	// sanity: Now should be close to wall clock (smoke check)
+	if time.Since(now) > 5*time.Second {
+		t.Fatalf("Clock.Now seems off; now=%v, time.Now()=%v", now, time.Now())
+	}
+}
+
+func TestSet_UsesClock(t *testing.T) {
+	t0 := time.Date(2025, 8, 19, 12, 0, 0, 0, time.UTC)
+	fc := &FakeClock{now: t0}
+	s := NewStoreWithClock(fc)
+
+	e1 := s.Set("k", "A")
+	if !e1.UpdatedAt.Equal(t0) {
+		t.Errorf("expected UpdatedAt=%v, got %v", t0, e1.UpdatedAt)
+	}
+
+	// Fast forward 5 minutes instantly (no sleep!)
+	fc.Advance(5 * time.Minute)
+	e2 := s.Set("k", "B")
+	if !e2.UpdatedAt.Equal(t0.Add(5 * time.Minute)) {
+		t.Errorf("expected UpdatedAt=%v, got %v", t0.Add(5*time.Minute), e2.UpdatedAt)
 	}
 }

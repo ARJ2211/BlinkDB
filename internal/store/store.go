@@ -2,6 +2,7 @@
 // Responsibilities:
 // - Hold an in‑memory map from key(string) -> Entry
 // - Provide basic operations: Set, Get, Delete, Size, (optional) Keys
+// - History[key] will be append‑only, time‑ordered by UpdatedAt.
 // Concurrency: none yet (single-threaded). Mutex comes in 1D.
 //
 // Methods to implement in 1A (signatures you will write later):
@@ -21,23 +22,41 @@ package store
 
 import "time"
 
-type Clock struct {
-	Now func() time.Time
+type Clock interface {
+	Now() time.Time
+}
+
+type RealClock struct{}
+
+func (RealClock) Now() time.Time {
+	return time.Now()
 }
 
 type Store struct {
-	data  map[string]Entry
-	Clock Clock
+	data    map[string]Entry
+	history map[string][]Entry
+	Clock   Clock
 }
 
 // CREATE A NEW STORE
 func NewStore() *Store {
 	data := make(map[string]Entry)
+	history := make(map[string][]Entry)
 	s := Store{
-		data:  data,
-		Clock: Clock{Now: time.Now},
+		data:    data,
+		history: history,
+		Clock:   RealClock{},
 	}
 	return &s
+}
+
+// For tests: create a store with a custom clock
+func NewStoreWithClock(c Clock) *Store {
+	return &Store{
+		data:    make(map[string]Entry),
+		history: make(map[string][]Entry),
+		Clock:   c,
+	}
 }
 
 // GET THE ENTRY FROM THE STORE BASED ON THE KEY
@@ -149,7 +168,7 @@ func (s *Store) CAS(key string, expected string, newValue string) bool {
 			newEntry := Entry{
 				Value:     newValue,
 				CreatedAt: entry.CreatedAt,
-				UpdatedAt: time.Now(),
+				UpdatedAt: s.Clock.Now(),
 				Version:   entry.Version + 1,
 			}
 			s.data[key] = newEntry
