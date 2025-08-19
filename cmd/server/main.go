@@ -42,16 +42,17 @@ func clearTerminal() {
 }
 
 func printMiniBanner(addr string) {
-	fmt.Printf("%sBlinkDB%s at %shttp://localhost%s%s\n",
+	fmt.Print(banner)
+	fmt.Printf("%sBlinkDB%s at %shttp://localhost%s%s\n\n",
 		ansiBold, ansiReset, ansiGreen, addr, ansiReset)
 
 	fmt.Println(ansiDim + "Endpoints:" + ansiReset)
-	fmt.Println("  GET    /v1/kv                 # list live keys")
-	fmt.Println("  PUT    /v1/kv/{key}           # create/update (TTL rules)")
+	fmt.Println("  GET    /v1/kv                     # list live keys")
+	fmt.Println("  PUT    /v1/kv/{key}               # create/update (TTL rules)")
 	fmt.Println("  GET    /v1/kv/{key}[?at=RFC3339]  # read now / time-travel")
-	fmt.Println("  POST   /v1/kv/{key}:cas        # CAS by version (preserves TTL)")
-	fmt.Println("  DELETE /v1/kv/{key}            # tombstone delete")
-	fmt.Println("  POST   /v1/admin/sweep         # GC expired (no tombstones)")
+	fmt.Println("  POST   /v1/kv/{key}:cas           # CAS by version (preserves TTL)")
+	fmt.Println("  DELETE /v1/kv/{key}               # tombstone delete")
+	fmt.Println("  POST   /v1/admin/sweep            # GC expired (no tombstones)")
 
 	// 2 quick examples
 	fmt.Println(ansiDim + "\nExamples:" + ansiReset)
@@ -88,7 +89,6 @@ func main() {
 
 	mux.Handle("/", h)
 
-	fmt.Println("BlinkDB listening on", addr)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		fmt.Fprintln(os.Stderr, "server error:", err)
 		os.Exit(1)
