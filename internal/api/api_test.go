@@ -578,6 +578,159 @@ func TestSWEEP_Before_NotSupported_400(t *testing.T) {
 	}
 }
 
+func TestGET_At_BasicHistory(t *testing.T) {
+	t0 := time.Date(2025, 8, 19, 12, 0, 0, 0, time.UTC)
+	st, router, fc := newTestHTTPWithClock(t, t0)
+
+	eA := st.Set("k", "A") // 12:00
+	fc.now = fc.now.Add(5 * time.Minute)
+	eB := st.Set("k", "B") // 12:05
+	fc.now = fc.now.Add(5 * time.Minute)
+	eC := st.Set("k", "C") // 12:10
+
+	// before first write -> 404
+	req := httptest.NewRequest(http.MethodGet, "/v1/kv/k?at="+t0.Add(-time.Minute).Format(time.RFC3339), nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status=%d, want 404 before first write", rec.Code)
+	}
+
+	// exactly at A -> A
+	req = httptest.NewRequest(http.MethodGet, "/v1/kv/k?at="+eA.UpdatedAt.UTC().Format(time.RFC3339), nil)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200 at A", rec.Code)
+	}
+	var dto EntryDTO
+	_ = json.Unmarshal(rec.Body.Bytes(), &dto)
+	if dto.Value != "A" || dto.Version != 1 {
+		t.Fatalf("want A@v1, got %+v", dto)
+	}
+
+	// between B and C (12:07) -> B
+	at := eB.UpdatedAt.Add(2 * time.Minute).UTC().Format(time.RFC3339)
+	req = httptest.NewRequest(http.MethodGet, "/v1/kv/k?at="+at, nil)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200 at 12:07", rec.Code)
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &dto)
+	if dto.Value != "B" || dto.Version != 2 {
+		t.Fatalf("want B@v2 at 12:07, got %+v", dto)
+	}
+
+	// long after C -> C
+	at = eC.UpdatedAt.Add(10 * time.Hour).UTC().Format(time.RFC3339)
+	req = httptest.NewRequest(http.MethodGet, "/v1/kv/k?at="+at, nil)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200 long after C", rec.Code)
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &dto)
+	if dto.Value != "C" || dto.Version != 3 {
+		t.Fatalf("want C@v3 long after, got %+v", dto)
+	}
+}
+
+func TestGET_At_RespectsTTL(t *testing.T) {
+	t0 := time.Date(2025, 8, 19, 12, 0, 0, 0, time.UTC)
+	st, router, _ := newTestHTTPWithClock(t, t0)
+
+	eA := st.SetWithTTL("ttl", "A", 3*time.Minute) // expires 12:03
+	if eA.ExpiresAt.IsZero() {
+		t.Fatalf("precondition: ExpiresAt should be set")
+	}
+
+	// 12:02 -> A
+	at := t0.Add(2 * time.Minute).UTC().Format(time.RFC3339)
+	req := httptest.NewRequest(http.MethodGet, "/v1/kv/ttl?at="+at, nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200 at 12:02", rec.Code)
+	}
+
+	// 12:03 (expiry boundary) -> 404
+	at = t0.Add(3 * time.Minute).UTC().Format(time.RFC3339)
+	req = httptest.NewRequest(http.MethodGet, "/v1/kv/ttl?at="+at, nil)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status=%d, want 404 at expiry boundary", rec.Code)
+	}
+
+	// After expiry but before any new write -> 404
+	at = t0.Add(4 * time.Minute).UTC().Format(time.RFC3339)
+	req = httptest.NewRequest(http.MethodGet, "/v1/kv/ttl?at="+at, nil)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status=%d, want 404 after expiry before next write", rec.Code)
+	}
+
+	// Write B at 12:05 (no TTL) and query 12:06 -> B
+	atB := t0.Add(5 * time.Minute).UTC()
+	st.Clock.Now() // no-op, just to show we aren’t moving time here
+	st.Set("ttl", "B")
+	req = httptest.NewRequest(http.MethodGet, "/v1/kv/ttl?at="+atB.Add(time.Minute).Format(time.RFC3339), nil)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200 after B", rec.Code)
+	}
+}
+
+func TestGET_At_DeleteBarrier(t *testing.T) {
+	t0 := time.Date(2025, 8, 19, 12, 0, 0, 0, time.UTC)
+	st, router, fc := newTestHTTPWithClock(t, t0)
+
+	st.Set("gone", "A")                  // 12:00
+	fc.now = fc.now.Add(5 * time.Minute) // 12:05
+	if ok := st.Delete("gone"); !ok {
+		t.Fatalf("delete should succeed")
+	}
+
+	// 12:04 -> A
+	req := httptest.NewRequest(http.MethodGet, "/v1/kv/gone?at="+t0.Add(4*time.Minute).Format(time.RFC3339), nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200 at 12:04", rec.Code)
+	}
+
+	// 12:05 (delete time) -> 404
+	req = httptest.NewRequest(http.MethodGet, "/v1/kv/gone?at="+t0.Add(5*time.Minute).Format(time.RFC3339), nil)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status=%d, want 404 at delete time", rec.Code)
+	}
+
+	// 12:06 -> 404
+	req = httptest.NewRequest(http.MethodGet, "/v1/kv/gone?at="+t0.Add(6*time.Minute).Format(time.RFC3339), nil)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status=%d, want 404 after delete", rec.Code)
+	}
+}
+
+func TestGET_At_BadFormat_400(t *testing.T) {
+	_, router := newTestHTTP(t, time.Now().UTC())
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/kv/k?at=not-a-time", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400 for bad 'at'", rec.Code)
+	}
+}
+
 // --- helpers ---
 
 func containsIn(s, substr string) bool {
