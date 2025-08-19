@@ -72,7 +72,6 @@ func (s *Store) nextVersionFromHistory(key string) int64 {
 
 // Get returns the latest live entry for a key, if present.
 //
-// Policy: lazy-delete on expiry, history-agnostic.
 // - If key missing: returns (zero, false).
 // - If entry has no expiry (ExpiresAt.IsZero): return it.
 // - If expired (ExpiresAt <= now): delete from s.data and return (zero, false).
@@ -197,7 +196,7 @@ func (s *Store) Size() int {
 // CAS (Compare-And-Set) updates a value only if the current value matches
 // the expected string. Behavior:
 //   - If key missing: return false.
-//   - If expired: delete from s.data and return false (lazy delete semantics).
+//   - If expired: return false.
 //   - If value != expected: return false.
 //   - If value == expected: bump version, set UpdatedAt=now, preserve CreatedAt,
 //     preserve ExpiresAt (policy), write newValue.
