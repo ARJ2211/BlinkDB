@@ -17,7 +17,7 @@ func (RealClock) Now() time.Time {
 	return time.Now()
 }
 
-// Store holds live key→entry mappings plus an append-only history log.
+// Store holds live key->entry mappings plus an append-only history log.
 // Invariants:
 //   - s.data stores only the *latest* live version for each key.
 //   - s.history[key] is append-only, time-ordered by UpdatedAt, and includes
@@ -102,8 +102,8 @@ func (s *Store) Set(key string, value string) Entry {
 }
 
 // SetWithTTL writes a value with a TTL (time-to-live).
-// - ttl <= 0 → behaves like Set (no expiry).
-// - ttl > 0 → entry expires at now+ttl.
+// - ttl <= 0 -> behaves like Set (no expiry).
+// - ttl > 0 -> entry expires at now+ttl.
 // Versioning: same rules as Set.
 // Side effects:
 // - Updates s.data[key].
@@ -231,20 +231,20 @@ func (s *Store) SweepExpired() int {
 //
 // Examples (HH:MM):
 //   History:
-//     12:00 → "A" (ExpiresAt = 12:03)
-//     12:05 → "B" (no expiry)
+//     12:00 -> "A" (ExpiresAt = 12:03)
+//     12:05 -> "B" (no expiry)
 //
-//   GetWhen("k", 11:59) → not found        // before first write
-//   GetWhen("k", 12:00) → "A"              // exact match; A alive at 12:00
-//   GetWhen("k", 12:02) → "A"              // A alive; 12:03 > 12:02
-//   GetWhen("k", 12:03) → not found        // A expired at t (not visible)
-//   GetWhen("k", 12:04) → not found        // between A’s expiry and B’s write
-//   GetWhen("k", 12:06) → "B"              // latest <= t and alive
+//   GetWhen("k", 11:59) -> not found        // before first write
+//   GetWhen("k", 12:00) -> "A"              // exact match; A alive at 12:00
+//   GetWhen("k", 12:02) -> "A"              // A alive; 12:03 > 12:02
+//   GetWhen("k", 12:03) -> not found        // A expired at t (not visible)
+//   GetWhen("k", 12:04) -> not found        // between A’s expiry and B’s write
+//   GetWhen("k", 12:06) -> "B"              // latest <= t and alive
 //
 //   Same-timestamp tie:
-//     12:00 → "A" (v1)
-//     12:00 → "B" (v2, appended later)
-//   GetWhen("k", 12:00) → "B"              // picks last appended at that time
+//     12:00 -> "A" (v1)
+//     12:00 -> "B" (v2, appended later)
+//   GetWhen("k", 12:00) -> "B"              // picks last appended at that time
 
 func (s *Store) GetWhen(key string, t time.Time) (Entry, bool) {
 	ents, ok := s.history[key]
@@ -264,7 +264,7 @@ func (s *Store) GetWhen(key string, t time.Time) (Entry, bool) {
 	}
 	idx := l
 
-	// If idx == 0, all entries have UpdatedAt > t → nothing existed by time t.
+	// If idx == 0, all entries have UpdatedAt > t -> nothing existed by time t.
 	if idx == 0 {
 		return Entry{}, false
 	}
@@ -275,7 +275,7 @@ func (s *Store) GetWhen(key string, t time.Time) (Entry, bool) {
 		if e.ExpiresAt.IsZero() || e.ExpiresAt.After(t) {
 			return e, true
 		}
-		// else: this version had already expired at time t → keep scanning left
+		// else: this version had already expired at time t -> keep scanning left
 	}
 
 	return Entry{}, false
