@@ -85,7 +85,6 @@ func (s *Store) Get(key string) (Entry, bool) {
 			return entry, true
 		}
 		if entry.ExpiresAt.Before(n) || entry.ExpiresAt.Equal(n) {
-			delete(s.data, key) // lazy delete
 			return Entry{}, false
 		}
 		return entry, true
@@ -213,7 +212,6 @@ func (s *Store) CAS(key string, expected string, newValue string) bool {
 		return false
 	}
 	if !entry.ExpiresAt.IsZero() && (entry.ExpiresAt.Before(n) || entry.ExpiresAt.Equal(n)) {
-		delete(s.data, key) // lazy delete
 		return false
 	}
 	if entry.Value != expected {
