@@ -5,30 +5,29 @@ import (
 	"strings"
 )
 
-// NewRouter wires all routes. Use this in cmd/server/main.go.
-func NewRouter() http.Handler {
+// NewRouter wires all routes. Pass the Server so handlers can use the store.
+func NewRouter(srv *Server) http.Handler {
 	mux := http.NewServeMux()
 
 	// KV routes
 	mux.HandleFunc("/v1/kv/", func(w http.ResponseWriter, r *http.Request) {
-		// Route by method and suffix
 		path := r.URL.Path
 		if strings.HasSuffix(path, ":cas") {
 			if r.Method != http.MethodPost {
 				methodNotAllowed(w, []string{http.MethodPost})
 				return
 			}
-			CASValue(w, r)
+			srv.CASValue(w, r)
 			return
 		}
 
 		switch r.Method {
 		case http.MethodPut:
-			PutValue(w, r)
+			srv.PutValue(w, r)
 		case http.MethodGet:
-			GetValue(w, r)
+			srv.GetValue(w, r)
 		case http.MethodDelete:
-			DeleteValue(w, r)
+			srv.DeleteValue(w, r)
 		default:
 			methodNotAllowed(w, []string{http.MethodPut, http.MethodGet, http.MethodDelete})
 		}
@@ -40,7 +39,7 @@ func NewRouter() http.Handler {
 			methodNotAllowed(w, []string{http.MethodPost})
 			return
 		}
-		SweepExpired(w, r)
+		srv.SweepExpired(w, r)
 	})
 
 	return mux

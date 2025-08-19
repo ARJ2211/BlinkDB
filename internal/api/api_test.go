@@ -200,6 +200,86 @@ func TestPutValueRequest_JSON_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestGET_Found_200(t *testing.T) {
+	t0 := time.Date(2025, 8, 19, 12, 0, 0, 0, time.UTC)
+	st, router := newTestHTTP(t, t0)
+
+	st.Set("u1", "A")
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/kv/u1", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200", rec.Code)
+	}
+	var got EntryDTO
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Key != "u1" || got.Value != "A" || got.Version != 1 {
+		t.Fatalf("bad dto: %+v", got)
+	}
+	if got.ExpiresAt != "" {
+		t.Fatalf("did not expect expiresAt for Set without TTL; got %q", got.ExpiresAt)
+	}
+}
+
+func TestGET_Missing_404(t *testing.T) {
+	_, router := newTestHTTP(t, time.Now().UTC())
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/kv/missing", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status=%d, want 404", rec.Code)
+	}
+	var errBody ErrorResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &errBody)
+	if errBody.Error == "" {
+		t.Fatalf("expected error message in body")
+	}
+}
+
+func TestGET_Expired_404(t *testing.T) {
+	t0 := time.Date(2025, 8, 19, 12, 0, 0, 0, time.UTC)
+	st, router, fc := newTestHTTPWithClock(t, t0)
+
+	// write with short TTL
+	st.SetWithTTL("k", "A", 2*time.Second)
+
+	// move to expiry boundary
+	fc.now = fc.now.Add(2 * time.Second)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/kv/k", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status=%d, want 404 when expired", rec.Code)
+	}
+}
+
+func TestGET_Tombstoned_404(t *testing.T) {
+	t0 := time.Date(2025, 8, 19, 12, 0, 0, 0, time.UTC)
+	st, router := newTestHTTP(t, t0)
+
+	st.Set("z", "A")
+	ok := st.Delete("z")
+	if !ok {
+		t.Fatalf("precondition: delete should succeed")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/kv/z", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status=%d, want 404 for tombstoned key", rec.Code)
+	}
+}
+
 // --- helpers ---
 
 func containsIn(s, substr string) bool {
@@ -235,4 +315,12 @@ func mustJSON(t *testing.T, v any) []byte {
 		t.Fatalf("marshal: %v", err)
 	}
 	return b
+}
+
+func newTestHTTPWithClock(t *testing.T, t0 time.Time) (*store.Store, http.Handler, *fakeClock) {
+	t.Helper()
+	fc := &fakeClock{now: t0}
+	st := store.NewStoreWithClock(fc)
+	srv := NewServer(st)
+	return st, NewRouter(srv), fc
 }
