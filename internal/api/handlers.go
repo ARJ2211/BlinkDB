@@ -15,25 +15,25 @@ import (
 //
 // Conventions/Policies implemented here:
 //
-// • Timestamps: all serialized timestamps are RFC3339 in UTC.
-// • Status codes:
-//   - 201 Created  → new key created by PUT
-//   - 200 OK       → successful GET/PUT(update)/DELETE/CAS/SWEEP
-//   - 400 BadRequest → invalid JSON or invalid inputs (e.g., bad RFC3339, illegal TTL combo)
-//   - 404 NotFound → key not present *at the requested time* (missing/expired/tombstoned)
-//   - 409 Conflict → CAS version mismatch
+// x Timestamps: all serialized timestamps are RFC3339 in UTC.
+// x Status codes:
+//   - 201 Created  -> new key created by PUT
+//   - 200 OK       -> successful GET/PUT(update)/DELETE/CAS/SWEEP
+//   - 400 BadRequest -> invalid JSON or invalid inputs (e.g., bad RFC3339, illegal TTL combo)
+//   - 404 NotFound -> key not present *at the requested time* (missing/expired/tombstoned)
+//   - 409 Conflict -> CAS version mismatch
 //
-// • TTL semantics:
+// x TTL semantics:
 //   - PUT with neither ttlSeconds nor expiresAt:
-//       * If key is NEW    → create without TTL
-//       * If key EXISTS    → preserve existing TTL (if still in the future)
+//       * If key is NEW    -> create without TTL
+//       * If key EXISTS    -> preserve existing TTL (if still in the future)
 //   - PUT with clearTTL: remove TTL regardless of prior state
 //   - PUT with ttlSeconds: set relative TTL
 //   - PUT with expiresAt: set absolute TTL (must be strictly in the future)
 //   - CAS always preserves existing TTL on success.
-// • Delete semantics:
+// x Delete semantics:
 //   - DELETE writes a tombstone (version++, Deleted=true) via the store.
-// • Sweep semantics:
+// x Sweep semantics:
 //   - /v1/admin/sweep performs GC at “now”: removes expired keys from the live map.
 //   - Sweep does NOT write tombstones.
 //   - Request field `before` is not supported (returns 400).
@@ -47,10 +47,10 @@ import (
 //   - If no TTL fields are provided and the key already exists, we preserve its TTL
 //     by computing the remaining duration and calling SetWithTTL.
 //   - TTL selection precedence:
-//     clearTTL → strip TTL
-//     ttlSeconds → set relative TTL
-//     expiresAt  → parse RFC3339, must be in the future; set absolute TTL
-//     none       → new key (no TTL) / existing key (preserve TTL)
+//     clearTTL -> strip TTL
+//     ttlSeconds -> set relative TTL
+//     expiresAt  -> parse RFC3339, must be in the future; set absolute TTL
+//     none       -> new key (no TTL) / existing key (preserve TTL)
 func (srv *Server) PutValue(w http.ResponseWriter, r *http.Request) {
 	key, ok := getKey(r)
 	if !ok || key == "" {
@@ -111,8 +111,8 @@ func (srv *Server) PutValue(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// No TTL fields:
-	// • New key  → create without TTL
-	// • Existing → preserve existing (unexpired) TTL
+	// x New key  -> create without TTL
+	// x Existing -> preserve existing (unexpired) TTL
 	if existed && !old.ExpiresAt.IsZero() && old.ExpiresAt.After(now) {
 		remaining := old.ExpiresAt.Sub(now)
 		ent := srv.S.SetWithTTL(key, req.Value, remaining)
@@ -152,8 +152,8 @@ func writeEntryDTO(w http.ResponseWriter, existed bool, key string, ent store.En
 // GetValue returns the current value for {key}, or a historical value when
 // the optional query parameter `at` is provided.
 //
-// • Without `at`: uses store.Get (respects lazy delete/expiry at "now").
-// • With `at`: parses RFC3339 and uses store.GetWhen to time-travel read.
+// x Without `at`: uses store.Get (respects lazy delete/expiry at "now").
+// x With `at`: parses RFC3339 and uses store.GetWhen to time-travel read.
 //   - 400 on bad time format
 //   - 404 when the key is not visible at that instant (missing, expired by T, or tombstoned at/ before T).
 func (srv *Server) GetValue(w http.ResponseWriter, r *http.Request) {
@@ -215,10 +215,10 @@ func (srv *Server) GetValue(w http.ResponseWriter, r *http.Request) {
 // CASValue performs a Compare-And-Swap using the current version.
 // Request: { "expectedVersion": <int>, "value": "<string>" }
 // Responses:
-//   - 200 OK     → CAS succeeded (value updated, version++); TTL preserved by the store
-//   - 404 NotFound → key missing/expired/tombstoned at "now"
-//   - 409 Conflict → version mismatch (key still present)
-//   - 400 BadRequest → invalid JSON / missing value
+//   - 200 OK     -> CAS succeeded (value updated, version++); TTL preserved by the store
+//   - 404 NotFound -> key missing/expired/tombstoned at "now"
+//   - 409 Conflict -> version mismatch (key still present)
+//   - 400 BadRequest -> invalid JSON / missing value
 func (srv *Server) CASValue(w http.ResponseWriter, r *http.Request) {
 	key, ok := getKey(r)
 	if !ok || key == "" {
@@ -254,7 +254,7 @@ func (srv *Server) CASValue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Success: map store.Entry → DTO (TTL preserved by store policy).
+	// Success: map store.Entry -> DTO (TTL preserved by store policy).
 	dto := EntryDTO{
 		Key:       key,
 		Value:     updated.Value,
