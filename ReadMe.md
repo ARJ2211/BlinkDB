@@ -4,7 +4,7 @@ A compact, test-driven **Go** key–value store that keeps **full per-key histor
 
 > **Status**  
 > ✅ Store layer (**1E**) complete: versions, TTL, CAS, append-only history, `GetWhen` snapshot semantics, tombstones.  
-> ✅ HTTP API built: PUT / GET / GET?at / DELETE / CAS / SWEEP.  
+> ✅ HTTP API built: PUT / GET / GET?at / **GET (list keys)** / DELETE / CAS / SWEEP.  
 > ⏭ Next (1D): add `RWMutex` for concurrency.
 
 ---
@@ -62,6 +62,9 @@ s.Delete("user:1")
 
 // 7) Sweep expired (GC at “now”)
 n := s.SweepExpired()
+
+// 8) List current keys (order not guaranteed)
+keys := s.Keys()
 ```
 
 ---
@@ -73,6 +76,7 @@ n := s.SweepExpired()
 - **TTL** per write; **lazy expiry** on `Get` + **manual sweep** for GC.
 - **CAS by version**: `expectedVersion` → update or conflict (409). **TTL preserved** on success.
 - **Tombstones** on explicit delete (historical evidence of removal).
+- **List keys**: `GET /v1/kv` returns live keys (after lazy expiry & sweeps).
 - **RFC3339 UTC** timestamps in API responses.
 
 ---
@@ -90,6 +94,7 @@ go run ./cmd/server
 Then hit (default router prefix):
 
 ```
+GET    /v1/kv                   # list keys
 PUT    /v1/kv/{key}
 GET    /v1/kv/{key}
 GET    /v1/kv/{key}?at=<RFC3339>
@@ -153,6 +158,12 @@ POST   /v1/admin/sweep
   }
 }
 
+// KeysResponse (GET /v1/kv)
+{
+  "keys": ["k1","k2"],
+  "size": 2
+}
+
 // SweepRequest (NOTE: "before" is NOT supported; will 400 if provided)
 { "before": "2025-08-19T13:00:00Z" }
 
@@ -167,6 +178,18 @@ POST   /v1/admin/sweep
 ```
 
 ### Endpoints
+
+#### GET `/v1/kv` — List live keys
+
+- Returns keys currently present in the live map (after lazy expiry / prior sweeps).
+- **200** with `{ "keys": [...], "size": <int> }`. Order is not guaranteed.
+
+```bash
+curl -s 'http://localhost:8080/v1/kv'
+# {"keys":["k1","k2"],"size":2}
+```
+
+---
 
 #### PUT `/v1/kv/{key}` — Create/Update with TTL rules
 
@@ -324,7 +347,7 @@ GET k?at=12:07Z  -> "B"
 │   ├── api
 │   │   ├── api_test.go       # API handler tests (table-driven)
 │   │   ├── dto.go            # JSON DTOs (EntryDTO, PutValueRequest, etc.)
-│   │   ├── handlers.go       # PUT/GET/GET?at/CAS/DELETE/SWEEP
+│   │   ├── handlers.go       # PUT/GET/GET?at/CAS/DELETE/SWEEP/GET list keys
 │   │   └── http.go           # router wiring & server
 │   ├── config
 │   │   └── config.go
