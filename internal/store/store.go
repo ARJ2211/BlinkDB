@@ -159,3 +159,16 @@ func (s *Store) CAS(key string, expected string, newValue string) bool {
 	}
 	return false
 }
+
+// BULD DELETE ANY AND ALL EXPIRED KEYS
+func (s *Store) SweepExpired() int {
+	n := s.Clock.Now()
+	removed := 0
+	for key, ents := range s.data {
+		if !ents.ExpiresAt.IsZero() && (ents.ExpiresAt.Before(n) || ents.ExpiresAt.Equal(n)) {
+			delete(s.data, key)
+			removed += 1
+		}
+	}
+	return removed
+}

@@ -283,3 +283,36 @@ func TestGet_OverwriteExpiredKey_WorksNormally(t *testing.T) {
 		t.Fatalf("expected expiry cleared on Set without TTL")
 	}
 }
+
+func TestSweepExpired_RemovesOnlyExpired(t *testing.T) {
+	t0 := time.Unix(1_700_000_000, 0).UTC()
+	s, now := newTestStoreWithClock(t, t0)
+
+	// Set two keys, one short TTL, one long TTL
+	s.SetWithTTL("short", "A", 2*time.Second) // expires at t0+2s
+	s.SetWithTTL("long", "B", 20*time.Second) // expires at t0+20s
+
+	// Advance just past the short expiry
+	advance(now, 3*time.Second)
+
+	removed := s.SweepExpired()
+	if removed != 1 {
+		t.Fatalf("expected 1 key removed, got %d", removed)
+	}
+
+	// short should be gone
+	if _, ok := s.Get("short"); ok {
+		t.Fatalf("expected 'short' to be deleted after sweep")
+	}
+
+	// long should still be present
+	if e, ok := s.Get("long"); !ok || e.Value != "B" {
+		t.Fatalf("expected 'long' to still be present")
+	}
+
+	// Second sweep should remove nothing
+	removed2 := s.SweepExpired()
+	if removed2 != 0 {
+		t.Fatalf("expected 0 keys removed on second sweep, got %d", removed2)
+	}
+}
