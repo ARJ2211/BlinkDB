@@ -2,26 +2,41 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"net/http"
-	"time"
+	"os"
+
+	"github.com/ARJ2211/blinkdb/internal/api"
+	"github.com/ARJ2211/blinkdb/internal/observability"
+	"github.com/ARJ2211/blinkdb/internal/store"
 )
 
-func showTime(t time.Time) string {
-	ft := t.Format(time.UTC.String())
-	return ft
-}
-
 func main() {
-	//==============================================================
-	// minimal HTTP server with health endpoint
+	// Store and API router
+	st := store.NewStore()
+	srv := api.NewServer(st)
+	router := api.NewRouter(srv)
+
+	// Structured JSON logs to stdout
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	}))
+	slog.SetDefault(logger)
+
+	// Compose middlewares: recover -> log -> router
+	var h http.Handler = router
+	h = observability.Recoverer(logger)(h)
+	h = observability.HTTPLogger(logger)(h)
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Printf("%v /healthz -> OK\n", showTime(time.Now()))
-		fmt.Fprintln(w, "OK")
-	})
+	mux.Handle("/healthz", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("OK"))
+	}))
+	mux.Handle("/", h)
 
 	addr := ":8080"
-	fmt.Println("BlinkDB server listening on: ", addr)
+	fmt.Println("BlinkDB listening on", addr)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		panic(err)
 	}

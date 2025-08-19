@@ -366,3 +366,12 @@ func (srv *Server) SweepExpired(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, SweepResponse{Swept: n, Keys: removed})
 }
+
+// ListKeys: GET /v1/kv  → returns all live keys (order not guaranteed).
+func (srv *Server) ListKeys(w http.ResponseWriter, r *http.Request) {
+	keys := srv.S.Keys()
+	writeJSON(w, http.StatusOK, KeysResponse{
+		Keys: keys,
+		Size: len(keys),
+	})
+}
