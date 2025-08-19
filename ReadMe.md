@@ -1,3 +1,6 @@
+<p align="center">
+<img src="https://github.com/ARJ2211/BlinkDB/blob/main/assets/blink_logo.png?raw=true" alt="logo" width="300" height="300"/>
+</p>
 # 🧠 BlinkDB — Versioned, Time-Traveling, In-Memory KV (TTL, CAS, Tombstones)
 
 A compact, test-driven **Go** key–value store that keeps **full per-key history**, supports **TTL**, exposes **versioned CAS**, and answers **time-travel queries** (“what did this key look like at time _t_?”). Explicit deletes are recorded as **tombstones**, so time travel reflects removals.
