@@ -21,7 +21,7 @@ func main() {
 	})
 
 	addr := ":8080"
-	fmt.Println("BlinkDB server listening on", addr)
+	fmt.Println("BlinkDB server listening on: ", addr)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		panic(err)
 	}

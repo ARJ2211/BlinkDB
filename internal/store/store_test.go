@@ -175,10 +175,10 @@ func TestKeys_ContentsIgnoreOrder(t *testing.T) {
 
 func TestCAS_SuccessAndFail(t *testing.T) {
 	s := NewStore()
-	s.Set("u1", "A")
+	e0 := s.Set("u1", "A")
 
-	// success
-	if ok := s.CAS("u1", "A", "B"); !ok {
+	// success (expectedVersion = v1)
+	if _, ok := s.CASVersion("u1", e0.Version, "B"); !ok {
 		t.Fatalf("CAS should succeed when expected matches")
 	}
 	e, ok := s.Get("u1")
@@ -190,8 +190,8 @@ func TestCAS_SuccessAndFail(t *testing.T) {
 	}
 	prevUpdated := e.UpdatedAt
 
-	// failure (expected mismatch)
-	if ok := s.CAS("u1", "A", "C"); ok {
+	// failure (expectedVersion stale: still v1)
+	if _, ok := s.CASVersion("u1", e0.Version, "C"); ok {
 		t.Fatalf("CAS should fail when expected mismatches")
 	}
 	e2, _ := s.Get("u1")
@@ -204,7 +204,7 @@ func TestCAS_SuccessAndFail(t *testing.T) {
 	}
 
 	// missing key
-	if ok := s.CAS("missing", "X", "Y"); ok {
+	if _, ok := s.CASVersion("missing", 1, "Y"); ok {
 		t.Fatalf("CAS on missing key should return false")
 	}
 }
@@ -366,9 +366,9 @@ func TestCAS_PreservesTTL_OnSuccess(t *testing.T) {
 	exp := eA.ExpiresAt
 
 	// ensure UpdatedAt changes
-	advance(fc, time.Nanosecond) // <-- add this line
+	advance(fc, time.Nanosecond)
 
-	if ok := s.CAS("k", "A", "B"); !ok {
+	if _, ok := s.CASVersion("k", eA.Version, "B"); !ok {
 		t.Fatalf("CAS should succeed")
 	}
 	eB, ok := s.Get("k")
@@ -387,11 +387,11 @@ func TestCAS_RespectsExpiry(t *testing.T) {
 	t0 := time.Unix(1_700_000_000, 0).UTC()
 	s, fc := newTestStoreAt(t, t0)
 
-	s.SetWithTTL("k", "A", 30*time.Second)
+	e := s.SetWithTTL("k", "A", 30*time.Second)
 	advance(fc, 30*time.Second) // at expiry boundary
 
 	// CAS should fail and key should be removed (lazy delete semantics)
-	if ok := s.CAS("k", "A", "B"); ok {
+	if _, ok := s.CASVersion("k", e.Version, "B"); ok {
 		t.Fatalf("CAS should fail when entry is expired")
 	}
 	if _, ok := s.Get("k"); ok {
@@ -408,7 +408,7 @@ func TestCAS_NoTTL_PreservesNone(t *testing.T) {
 		t.Fatalf("precondition: Set without TTL should have zero ExpiresAt")
 	}
 
-	if ok := s.CAS("k", "A", "B"); !ok {
+	if _, ok := s.CASVersion("k", eA.Version, "B"); !ok {
 		t.Fatalf("CAS should succeed")
 	}
 	eB, ok := s.Get("k")
@@ -448,7 +448,7 @@ func TestHistory_AppendsOnSetAndCAS(t *testing.T) {
 	}
 
 	advance(fc, time.Minute)
-	if ok := s.CAS("k", "B", "C"); !ok {
+	if _, ok := s.CASVersion("k", e2.Version, "C"); !ok {
 		t.Fatalf("CAS should succeed")
 	}
 	if got := len(s.history["k"]); got != 3 {
@@ -505,11 +505,11 @@ func TestHistory_NoAppendOnCASFail(t *testing.T) {
 	t0 := time.Unix(1_700_000_000, 0).UTC()
 	s, _ := newTestStoreAt(t, t0)
 
-	_ = s.Set("x", "A")
+	e := s.Set("x", "A")
 	before := len(s.history["x"])
 
-	// wrong expected, should fail and not append
-	if ok := s.CAS("x", "wrong", "B"); ok {
+	// wrong expected version, should fail and not append
+	if _, ok := s.CASVersion("x", e.Version+10, "B"); ok {
 		t.Fatalf("CAS should fail with wrong expected")
 	}
 	after := len(s.history["x"])
@@ -889,7 +889,7 @@ func TestSet_AfterTombstone_UsesNextVersionAndClearsTTL(t *testing.T) {
 }
 
 func TestCAS_PreservesTTL_AndIsLiveEntry(t *testing.T) {
-	t0 := time.Date(2025, 8, 19, 12, 0, 0, 0, time.UTC)
+	t0 := time.Unix(1_700_000_000, 0).UTC()
 	s, fc := newTestStoreAt(t, t0)
 
 	e1 := s.SetWithTTL("k", "A", 5*time.Minute)
@@ -899,7 +899,7 @@ func TestCAS_PreservesTTL_AndIsLiveEntry(t *testing.T) {
 
 	// Advance a bit and CAS successfully
 	advance(fc, time.Minute)
-	if ok := s.CAS("k", "A", "B"); !ok {
+	if _, ok := s.CASVersion("k", e1.Version, "B"); !ok {
 		t.Fatalf("CAS should succeed")
 	}
 	e2, ok := s.Get("k")
