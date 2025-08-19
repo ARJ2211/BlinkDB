@@ -193,40 +193,41 @@ func (s *Store) Size() int {
 	return len(s.data)
 }
 
-// CAS (Compare-And-Set) updates a value only if the current value matches
-// the expected string. Behavior:
-//   - If key missing: return false.
-//   - If expired: return false.
-//   - If value != expected: return false.
-//   - If value == expected: bump version, set UpdatedAt=now, preserve CreatedAt,
-//     preserve ExpiresAt (policy), write newValue.
-//
-// Side effects:
-// - Updates s.data[key].
-// - Appends the new version to s.history[key].
-func (s *Store) CAS(key string, expected string, newValue string) bool {
+// CASVersion updates key to newValue only if the current live version matches expectedVersion.
+// Returns the updated entry and true on success; zero Entry and false otherwise.
+// Policy: preserves existing TTL (ExpiresAt), does not modify CreatedAt, bumps Version and UpdatedAt.
+func (s *Store) CASVersion(key string, expectedVersion int64, newValue string) (Entry, bool) {
 	n := s.Clock.Now()
-	entry, ok := s.data[key]
+
+	cur, ok := s.data[key]
 	if !ok {
-		return false
+		return Entry{}, false
 	}
-	if !entry.ExpiresAt.IsZero() && (entry.ExpiresAt.Before(n) || entry.ExpiresAt.Equal(n)) {
-		return false
+	// Treat tombstoned as not found
+	if cur.Deleted {
+		return Entry{}, false
 	}
-	if entry.Value != expected {
-		return false
+	// Reject if expired at or before now
+	if !cur.ExpiresAt.IsZero() && (cur.ExpiresAt.Before(n) || cur.ExpiresAt.Equal(n)) {
+		return Entry{}, false
 	}
-	newEntry := Entry{
+	// Version check
+	if cur.Version != expectedVersion {
+		return Entry{}, false
+	}
+
+	updated := Entry{
 		Value:     newValue,
-		CreatedAt: entry.CreatedAt,
+		CreatedAt: cur.CreatedAt,
 		UpdatedAt: n,
-		Version:   entry.Version + 1,
-		ExpiresAt: entry.ExpiresAt, // policy: preserve TTL on CAS
+		Version:   cur.Version + 1,
+		ExpiresAt: cur.ExpiresAt, // preserve TTL
 		Deleted:   false,
 	}
-	s.data[key] = newEntry
-	s.history[key] = append(s.history[key], newEntry)
-	return true
+
+	s.data[key] = updated
+	s.history[key] = append(s.history[key], updated)
+	return updated, true
 }
 
 // SweepExpired scans s.data and deletes all entries whose ExpiresAt <= now.
