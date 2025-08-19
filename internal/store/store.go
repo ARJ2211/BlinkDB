@@ -68,3 +68,45 @@ func (s *Store) Set(key string, value string) Entry {
 	s.data[key] = newEntry
 	return newEntry
 }
+
+// DELETE THE KEY FROM THE STORE
+func (s *Store) Delete(key string) bool {
+	if _, ok := s.data[key]; ok {
+		delete(s.data, key)
+		return true
+	}
+	return false
+}
+
+// LIST THE KEYS IN THE STORE
+func (s *Store) Keys() []string {
+	keys := []string{}
+	for i := range s.data {
+		keys = append(keys, i)
+	}
+	return keys
+}
+
+// SIZE OF THE DATASTORE (# OF KEYS)
+func (s *Store) Size() int {
+	count := len(s.data)
+	return count
+}
+
+// COMPARE AND SET
+func (s *Store) CAS(key string, expected string, newValue string) bool {
+	if entry, ok := s.data[key]; ok {
+		if entry.Value == expected {
+			newEntry := Entry{
+				Value:     newValue,
+				CreatedAt: entry.CreatedAt,
+				UpdatedAt: time.Now(),
+				Version:   entry.Version + 1,
+			}
+			s.data[key] = newEntry
+			return true
+		}
+		return false
+	}
+	return false
+}

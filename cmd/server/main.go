@@ -42,6 +42,34 @@ func main() {
 		fmt.Println("Get missing -> not found")
 	}
 
+	if ok := s.Delete("u1"); ok {
+		fmt.Println("Deleted u1")
+	}
+	if ok := s.Delete("TEMP"); !ok {
+		fmt.Println("NOT FOUND")
+	}
+
+	allEntries := []store.Entry{
+		s.Set("u1", "A"),
+		s.Set("u2", "AB"),
+		s.Set("u3", "AC"),
+		s.Set("u4", "ABAS"),
+		s.Set("u5", "D"),
+		s.Set("u6", "AF"),
+	}
+	for i := range allEntries {
+		fmt.Println("Created!", i)
+	}
+
+	for _, ent := range s.Keys() {
+		fmt.Println(ent)
+	}
+
+	fmt.Println(s.CAS("u6", "AF", "AF_New"))
+	fmt.Println(s.Get("u6"))
+
+	fmt.Println("COUNT: ", s.Size())
+
 	//==============================================================
 	// minimal HTTP server with health endpoint
 	mux := http.NewServeMux()
