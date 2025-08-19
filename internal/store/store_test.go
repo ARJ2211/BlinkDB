@@ -62,6 +62,19 @@ func containsAll(have []string, want []string) bool {
 	return true
 }
 
+func newTestStoreWithClock(t *testing.T, t0 time.Time) (*Store, *time.Time) {
+	t.Helper()
+	s := NewStore()
+	// We chose to keep Clock public in this project
+	current := t0
+	s.Clock.Now = func() time.Time { return current }
+	return s, &current
+}
+
+func advance(current *time.Time, d time.Duration) {
+	*current = current.Add(d)
+}
+
 // --- tests ---
 
 func TestSetAndGet_NewAndUpdate(t *testing.T) {
@@ -204,5 +217,102 @@ func TestCAS_SuccessAndFail(t *testing.T) {
 	// missing key
 	if ok := s.CAS("missing", "X", "Y"); ok {
 		t.Fatalf("CAS on missing key should return false")
+	}
+}
+
+func TestGet_NotExpired_ReturnsEntry(t *testing.T) {
+	t0 := time.Unix(1_700_000_000, 0).UTC()
+	s, now := newTestStoreWithClock(t, t0)
+
+	s.SetWithTTL("k", "A", 10*time.Second) // expires at t0+10s
+
+	advance(now, 9*time.Second) // before expiry
+	e, ok := s.Get("k")
+	if !ok {
+		t.Fatalf("expected key present before expiry")
+	}
+	if e.Value != "A" {
+		t.Fatalf("expected value A, got %q", e.Value)
+	}
+	// still present on second Get if not expired
+	if _, ok2 := s.Get("k"); !ok2 {
+		t.Fatalf("expected key still present before expiry on second Get")
+	}
+}
+
+func TestGet_Expired_IsDeletedAndNotFound(t *testing.T) {
+	t0 := time.Unix(1_700_000_000, 0).UTC()
+	s, now := newTestStoreWithClock(t, t0)
+
+	s.SetWithTTL("k", "A", 3*time.Second) // expires at t0+3s
+
+	advance(now, 3*time.Second) // at expiry boundary
+
+	// First Get should lazily delete and report not found
+	if _, ok := s.Get("k"); ok {
+		t.Fatalf("expected not found at expiry boundary (lazy delete)")
+	}
+
+	// Subsequent Get should also be not found (it was deleted)
+	if _, ok := s.Get("k"); ok {
+		t.Fatalf("expected not found after lazy delete")
+	}
+}
+
+func TestGet_OverwriteExpiredKey_WorksNormally(t *testing.T) {
+	t0 := time.Unix(1_700_000_000, 0).UTC()
+	s, now := newTestStoreWithClock(t, t0)
+
+	s.SetWithTTL("k", "A", 1*time.Second)
+
+	advance(now, 2*time.Second) // now expired
+	if _, ok := s.Get("k"); ok {
+		t.Fatalf("expected not found after expiry and lazy delete")
+	}
+
+	// Overwrite with no TTL should clear expiry and be present
+	s.Set("k", "B")
+	e, ok := s.Get("k")
+	if !ok {
+		t.Fatalf("expected key present after Set without TTL")
+	}
+	if e.Value != "B" {
+		t.Fatalf("expected value B, got %q", e.Value)
+	}
+	if !e.ExpiresAt.IsZero() {
+		t.Fatalf("expected expiry cleared on Set without TTL")
+	}
+}
+
+func TestSweepExpired_RemovesOnlyExpired(t *testing.T) {
+	t0 := time.Unix(1_700_000_000, 0).UTC()
+	s, now := newTestStoreWithClock(t, t0)
+
+	// Set two keys, one short TTL, one long TTL
+	s.SetWithTTL("short", "A", 2*time.Second) // expires at t0+2s
+	s.SetWithTTL("long", "B", 20*time.Second) // expires at t0+20s
+
+	// Advance just past the short expiry
+	advance(now, 3*time.Second)
+
+	removed := s.SweepExpired()
+	if removed != 1 {
+		t.Fatalf("expected 1 key removed, got %d", removed)
+	}
+
+	// short should be gone
+	if _, ok := s.Get("short"); ok {
+		t.Fatalf("expected 'short' to be deleted after sweep")
+	}
+
+	// long should still be present
+	if e, ok := s.Get("long"); !ok || e.Value != "B" {
+		t.Fatalf("expected 'long' to still be present")
+	}
+
+	// Second sweep should remove nothing
+	removed2 := s.SweepExpired()
+	if removed2 != 0 {
+		t.Fatalf("expected 0 keys removed on second sweep, got %d", removed2)
 	}
 }
