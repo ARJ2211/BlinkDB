@@ -21,15 +21,21 @@ package store
 
 import "time"
 
+type Clock struct {
+	Now func() time.Time
+}
+
 type Store struct {
-	data map[string]Entry
+	data  map[string]Entry
+	Clock Clock
 }
 
 // CREATE A NEW STORE
 func NewStore() *Store {
 	data := make(map[string]Entry)
 	s := Store{
-		data: data,
+		data:  data,
+		Clock: Clock{Now: time.Now},
 	}
 	return &s
 }
@@ -44,14 +50,13 @@ func (s *Store) Get(key string) (Entry, bool) {
 
 // SET THE KEY IN THE STORE, IF KEY IN STORE UPDATE
 func (s *Store) Set(key string, value string) Entry {
-	now := time.Now()
-
+	n := s.Clock.Now()
 	if existing, ok := s.data[key]; ok {
 		// Existing key: bump version, update time, keep createdAt
 		newEntry := Entry{
 			Value:     value,
 			CreatedAt: existing.CreatedAt,
-			UpdatedAt: now,
+			UpdatedAt: n,
 			Version:   existing.Version + 1,
 		}
 		s.data[key] = newEntry
@@ -61,12 +66,47 @@ func (s *Store) Set(key string, value string) Entry {
 	// New key: version 1, createdAt = updatedAt = now
 	newEntry := Entry{
 		Value:     value,
-		CreatedAt: now,
-		UpdatedAt: now,
+		CreatedAt: n,
+		UpdatedAt: n,
 		Version:   1,
 	}
 	s.data[key] = newEntry
 	return newEntry
+}
+
+// SET THE KEY IN STORE WITH TTL NOW
+func (s *Store) SetWithTTL(
+	key string,
+	value string,
+	ttl time.Duration,
+) Entry {
+	n := s.Clock.Now()
+	if ttl <= 0 {
+		ent := s.Set(key, value)
+		return ent
+	} else {
+		if existing, ok := s.data[key]; ok {
+			// Existing key: bump version, update time, keep createdAt
+			newEntry := Entry{
+				Value:     value,
+				CreatedAt: existing.CreatedAt,
+				UpdatedAt: n,
+				Version:   existing.Version + 1,
+				ExpiresAt: n.Add(ttl),
+			}
+			s.data[key] = newEntry
+			return newEntry
+		}
+		newEntry := Entry{
+			Value:     value,
+			CreatedAt: n,
+			UpdatedAt: n,
+			Version:   1,
+			ExpiresAt: n.Add(ttl),
+		}
+		s.data[key] = newEntry
+		return newEntry
+	}
 }
 
 // DELETE THE KEY FROM THE STORE

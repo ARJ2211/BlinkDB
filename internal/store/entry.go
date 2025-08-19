@@ -14,4 +14,5 @@ type Entry struct {
 	CreatedAt time.Time
 	UpdatedAt time.Time
 	Version   uint64
+	ExpiresAt time.Time
 }
