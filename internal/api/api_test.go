@@ -279,6 +279,80 @@ func TestGET_Tombstoned_404(t *testing.T) {
 		t.Fatalf("status=%d, want 404 for tombstoned key", rec.Code)
 	}
 }
+func TestDELETE_Existing_ReturnsTombstone_200(t *testing.T) {
+	t0 := time.Date(2025, 8, 19, 12, 0, 0, 0, time.UTC)
+	st, router := newTestHTTP(t, t0)
+
+	e := st.Set("del", "A") // v1
+
+	req := httptest.NewRequest(http.MethodDelete, "/v1/kv/del", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200", rec.Code)
+	}
+	var dr DeleteResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &dr); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !dr.Entry.Deleted {
+		t.Fatalf("expected deleted=true")
+	}
+	if dr.Entry.Key != "del" {
+		t.Fatalf("expected key=del, got %q", dr.Entry.Key)
+	}
+	// version bumps by 1 across tombstone
+	if dr.Entry.Version != e.Version+1 {
+		t.Fatalf("expected version=%d, got %d", e.Version+1, dr.Entry.Version)
+	}
+	if dr.Entry.ExpiresAt != "" {
+		t.Fatalf("tombstone should not have expiresAt")
+	}
+
+	// subsequent GET should be 404
+	req2 := httptest.NewRequest(http.MethodGet, "/v1/kv/del", nil)
+	rec2 := httptest.NewRecorder()
+	router.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusNotFound {
+		t.Fatalf("after delete, GET status=%d, want 404", rec2.Code)
+	}
+}
+
+func TestDELETE_Missing_404(t *testing.T) {
+	_, router := newTestHTTP(t, time.Now().UTC())
+
+	req := httptest.NewRequest(http.MethodDelete, "/v1/kv/none", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status=%d, want 404", rec.Code)
+	}
+}
+
+func TestDELETE_SecondTime_404(t *testing.T) {
+	t0 := time.Date(2025, 8, 19, 12, 0, 0, 0, time.UTC)
+	st, router := newTestHTTP(t, t0)
+
+	st.Set("z", "A")
+
+	// first delete → 200
+	req1 := httptest.NewRequest(http.MethodDelete, "/v1/kv/z", nil)
+	rec1 := httptest.NewRecorder()
+	router.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("first delete status=%d, want 200", rec1.Code)
+	}
+
+	// second delete → 404 (store.Delete returns false)
+	req2 := httptest.NewRequest(http.MethodDelete, "/v1/kv/z", nil)
+	rec2 := httptest.NewRecorder()
+	router.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusNotFound {
+		t.Fatalf("second delete status=%d, want 404", rec2.Code)
+	}
+}
 
 // --- helpers ---
 

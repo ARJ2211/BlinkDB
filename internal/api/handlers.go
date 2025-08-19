@@ -139,11 +139,38 @@ func (srv *Server) CASValue(w http.ResponseWriter, r *http.Request) {
 }
 
 func (srv *Server) DeleteValue(w http.ResponseWriter, r *http.Request) {
-	if _, ok := getKey(r); !ok {
+	key, ok := getKey(r)
+	if !ok || key == "" {
 		writeError(w, http.StatusBadRequest, "missing key")
 		return
 	}
-	writeError(w, http.StatusNotImplemented, "not implemented")
+
+	cur, found := srv.S.Get(key)
+	if !found {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+
+	// Perform delete in the store (idempotent: returns false if already gone)
+	if ok := srv.S.Delete(key); !ok {
+		// if store says false, treat as not found at API level
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+
+	now := srv.S.Clock.Now().UTC()
+
+	// Build tombstone view for response (does not include value)
+	dto := EntryDTO{
+		Key:       key,
+		Version:   cur.Version + 1,
+		CreatedAt: cur.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
+		Deleted:   true,
+		// ExpiresAt omitted by omitempty
+	}
+
+	writeJSON(w, http.StatusOK, DeleteResponse{Entry: dto})
 }
 
 func (srv *Server) SweepExpired(w http.ResponseWriter, r *http.Request) {
