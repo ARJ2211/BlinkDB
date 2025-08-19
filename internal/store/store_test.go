@@ -354,3 +354,220 @@ func TestSet_UsesClock(t *testing.T) {
 		t.Errorf("expected UpdatedAt=%v, got %v", t0.Add(5*time.Minute), e2.UpdatedAt)
 	}
 }
+
+func TestCAS_PreservesTTL_OnSuccess(t *testing.T) {
+	t0 := time.Unix(1_700_000_000, 0).UTC()
+	s, fc := newTestStoreAt(t, t0)
+
+	eA := s.SetWithTTL("k", "A", 2*time.Minute)
+	if eA.ExpiresAt.IsZero() {
+		t.Fatalf("precondition: expected non-zero ExpiresAt")
+	}
+	exp := eA.ExpiresAt
+
+	// ensure UpdatedAt changes
+	advance(fc, time.Nanosecond) // <-- add this line
+
+	if ok := s.CAS("k", "A", "B"); !ok {
+		t.Fatalf("CAS should succeed")
+	}
+	eB, ok := s.Get("k")
+	if !ok {
+		t.Fatalf("expected key after CAS")
+	}
+	if !eB.ExpiresAt.Equal(exp) {
+		t.Fatalf("CAS should preserve TTL: want %v, got %v", exp, eB.ExpiresAt)
+	}
+	if !eB.UpdatedAt.After(eA.UpdatedAt) {
+		t.Fatalf("UpdatedAt should advance")
+	}
+}
+
+func TestCAS_RespectsExpiry(t *testing.T) {
+	t0 := time.Unix(1_700_000_000, 0).UTC()
+	s, fc := newTestStoreAt(t, t0)
+
+	s.SetWithTTL("k", "A", 30*time.Second)
+	advance(fc, 30*time.Second) // at expiry boundary
+
+	// CAS should fail and key should be removed (lazy delete semantics)
+	if ok := s.CAS("k", "A", "B"); ok {
+		t.Fatalf("CAS should fail when entry is expired")
+	}
+	if _, ok := s.Get("k"); ok {
+		t.Fatalf("expected key to be gone after CAS against expired entry")
+	}
+}
+
+func TestCAS_NoTTL_PreservesNone(t *testing.T) {
+	t0 := time.Unix(1_700_000_000, 0).UTC()
+	s, _ := newTestStoreAt(t, t0)
+
+	eA := s.Set("k", "A")
+	if !eA.ExpiresAt.IsZero() {
+		t.Fatalf("precondition: Set without TTL should have zero ExpiresAt")
+	}
+
+	if ok := s.CAS("k", "A", "B"); !ok {
+		t.Fatalf("CAS should succeed")
+	}
+	eB, ok := s.Get("k")
+	if !ok {
+		t.Fatalf("expected key after CAS")
+	}
+	if !eB.ExpiresAt.IsZero() {
+		t.Fatalf("CAS should preserve 'no TTL' (zero ExpiresAt), got %v", eB.ExpiresAt)
+	}
+}
+
+func TestHistory_AppendsOnSetAndCAS(t *testing.T) {
+	t0 := time.Unix(1_700_000_000, 0).UTC()
+	s, fc := newTestStoreAt(t, t0)
+
+	e1 := s.Set("k", "A")
+	if got := len(s.history["k"]); got != 1 {
+		t.Fatalf("history length after first Set = %d, want 1", got)
+	}
+	if s.history["k"][0].Version != 1 || s.history["k"][0].Value != "A" {
+		t.Fatalf("history[0] mismatch: %+v", s.history["k"][0])
+	}
+	if !s.history["k"][0].UpdatedAt.Equal(t0) {
+		t.Fatalf("history[0].UpdatedAt = %v, want %v", s.history["k"][0].UpdatedAt, t0)
+	}
+
+	advance(fc, time.Minute)
+	e2 := s.Set("k", "B")
+	if got := len(s.history["k"]); got != 2 {
+		t.Fatalf("history length after second Set = %d, want 2", got)
+	}
+	if s.history["k"][1].Version != 2 || s.history["k"][1].Value != "B" {
+		t.Fatalf("history[1] mismatch: %+v", s.history["k"][1])
+	}
+	if !s.history["k"][1].UpdatedAt.After(s.history["k"][0].UpdatedAt) {
+		t.Fatalf("history timestamps not increasing")
+	}
+
+	advance(fc, time.Minute)
+	if ok := s.CAS("k", "B", "C"); !ok {
+		t.Fatalf("CAS should succeed")
+	}
+	if got := len(s.history["k"]); got != 3 {
+		t.Fatalf("history length after CAS = %d, want 3", got)
+	}
+	if s.history["k"][2].Version != 3 || s.history["k"][2].Value != "C" {
+		t.Fatalf("history[2] mismatch: %+v", s.history["k"][2])
+	}
+
+	// sanity: Get still reflects latest from data and matches last history entry
+	cur, ok := s.Get("k")
+	if !ok {
+		t.Fatalf("expected key present")
+	}
+	last := s.history["k"][2]
+	if cur.Value != last.Value || cur.Version != last.Version || !cur.UpdatedAt.Equal(last.UpdatedAt) {
+		t.Fatalf("Get != last history: got %+v, last %+v", cur, last)
+	}
+
+	// also sanity: versions progressed 1->2->3
+	if e1.Version != 1 || e2.Version != 2 || cur.Version != 3 {
+		t.Fatalf("versions not 1,2,3: e1=%d e2=%d cur=%d", e1.Version, e2.Version, cur.Version)
+	}
+}
+
+func TestHistory_TTL_RecordedAndClearedCorrectly(t *testing.T) {
+	t0 := time.Unix(1_700_000_000, 0).UTC()
+	s, fc := newTestStoreAt(t, t0)
+
+	// Set with TTL should record non-zero ExpiresAt in history
+	eA := s.SetWithTTL("ttl", "A", 2*time.Minute)
+	if got := len(s.history["ttl"]); got != 1 {
+		t.Fatalf("history length after SetWithTTL = %d, want 1", got)
+	}
+	if s.history["ttl"][0].ExpiresAt.IsZero() {
+		t.Fatalf("history[0].ExpiresAt should be non-zero")
+	}
+	if !s.history["ttl"][0].ExpiresAt.Equal(eA.ExpiresAt) {
+		t.Fatalf("history[0].ExpiresAt mismatch: %v vs %v", s.history["ttl"][0].ExpiresAt, eA.ExpiresAt)
+	}
+
+	// A subsequent Set (no TTL) should append an entry with zero ExpiresAt
+	advance(fc, time.Minute)
+	_ = s.Set("ttl", "B")
+	if got := len(s.history["ttl"]); got != 2 {
+		t.Fatalf("history length after Set = %d, want 2", got)
+	}
+	if !s.history["ttl"][1].ExpiresAt.IsZero() {
+		t.Fatalf("history[1].ExpiresAt should be zero for Set without TTL, got %v", s.history["ttl"][1].ExpiresAt)
+	}
+}
+
+func TestHistory_NoAppendOnCASFail(t *testing.T) {
+	t0 := time.Unix(1_700_000_000, 0).UTC()
+	s, _ := newTestStoreAt(t, t0)
+
+	_ = s.Set("x", "A")
+	before := len(s.history["x"])
+
+	// wrong expected, should fail and not append
+	if ok := s.CAS("x", "wrong", "B"); ok {
+		t.Fatalf("CAS should fail with wrong expected")
+	}
+	after := len(s.history["x"])
+	if after != before {
+		t.Fatalf("history changed on CAS fail: before=%d after=%d", before, after)
+	}
+}
+
+func TestGet_LazyDelete_DoesNotTouchHistory(t *testing.T) {
+	t0 := time.Unix(1_700_000_000, 0).UTC()
+	s, fc := newTestStoreAt(t, t0)
+
+	// write with TTL (history should get 1 entry)
+	_ = s.SetWithTTL("k", "A", 3*time.Second)
+	if got := len(s.history["k"]); got != 1 {
+		t.Fatalf("precondition: history length = %d, want 1", got)
+	}
+
+	// advance to expiry boundary, first Get should lazily delete from s.data
+	advance(fc, 3*time.Second)
+	if _, ok := s.Get("k"); ok {
+		t.Fatalf("expected not found at expiry boundary (lazy delete)")
+	}
+
+	// history must remain untouched
+	if got := len(s.history["k"]); got != 1 {
+		t.Fatalf("lazy delete must not change history; got %d, want 1", got)
+	}
+}
+
+func TestGet_AfterLazyDelete_SetRecreatesCleanly(t *testing.T) {
+	t0 := time.Unix(1_700_000_000, 0).UTC()
+	s, fc := newTestStoreAt(t, t0)
+
+	// write with short TTL and expire it
+	_ = s.SetWithTTL("k", "A", 1*time.Second)
+	advance(fc, 1*time.Second)
+
+	// trigger lazy delete
+	if _, ok := s.Get("k"); ok {
+		t.Fatalf("expected not found at expiry boundary (lazy delete)")
+	}
+
+	// a normal Set should recreate the key with zero ExpiresAt
+	e := s.Set("k", "B")
+	if !e.ExpiresAt.IsZero() {
+		t.Fatalf("Set should clear expiry; got ExpiresAt=%v", e.ExpiresAt)
+	}
+
+	// Get returns fresh value B
+	g, ok := s.Get("k")
+	if !ok {
+		t.Fatalf("expected key present after Set")
+	}
+	if g.Value != "B" {
+		t.Fatalf("expected value B, got %q", g.Value)
+	}
+	if !g.ExpiresAt.IsZero() {
+		t.Fatalf("expected zero ExpiresAt on recreated entry, got %v", g.ExpiresAt)
+	}
+}

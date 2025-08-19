@@ -1,56 +1,43 @@
-// Store (1A spec)
-// Responsibilities:
-// - Hold an in‑memory map from key(string) -> Entry
-// - Provide basic operations: Set, Get, Delete, Size, (optional) Keys
-// - History[key] will be append‑only, time‑ordered by UpdatedAt.
-// Concurrency: none yet (single-threaded). Mutex comes in 1D.
-//
-// Methods to implement in 1A (signatures you will write later):
-// - Set(key string, value string) -> Entry
-// Behavior: if key is new, version=1 and createdAt=updatedAt=now.
-// if key exists, version++, updatedAt=now, createdAt unchanged.
-// Returns a copy/snapshot of the stored Entry after the write.
-// - Get(key string) -> (Entry, boolFound)
-// Behavior: does not modify state (no TTL yet). boolFound=false if missing.
-// - Delete(key string) -> (boolRemoved)
-// Behavior: true if something was deleted; false if key didn’t exist.
-// - Size() -> int
-// Behavior: number of live keys currently in the map.
-// - Keys() -> []string (optional in 1A; ordering unspecified)
-
 package store
 
 import "time"
 
+// Clock is an abstraction of time so we can substitute a fake clock in tests.
+// In production we use RealClock (which wraps time.Now).
 type Clock interface {
 	Now() time.Time
 }
 
+// RealClock implements Clock by returning the system wall clock.
 type RealClock struct{}
 
 func (RealClock) Now() time.Time {
 	return time.Now()
 }
 
+// Store holds live key→entry mappings plus an append-only history log.
+// Invariants:
+//   - s.data stores only the *latest* live version for each key.
+//   - s.history[key] is append-only, time-ordered by UpdatedAt, and includes
+//     every successful Set/SetWithTTL/CAS (whether or not the key later expired).
+//   - Concurrency: not safe for concurrent use. Mutex comes in milestone 1D.
 type Store struct {
-	data    map[string]Entry
-	history map[string][]Entry
-	Clock   Clock
+	data    map[string]Entry   // current live snapshot per key
+	history map[string][]Entry // append-only log of versions per key
+	Clock   Clock              // time source (real or fake)
 }
 
-// CREATE A NEW STORE
+// NewStore constructs a Store with a RealClock (wall time).
 func NewStore() *Store {
-	data := make(map[string]Entry)
-	history := make(map[string][]Entry)
-	s := Store{
-		data:    data,
-		history: history,
+	return &Store{
+		data:    make(map[string]Entry),
+		history: make(map[string][]Entry),
 		Clock:   RealClock{},
 	}
-	return &s
 }
 
-// For tests: create a store with a custom clock
+// NewStoreWithClock constructs a Store with a caller-supplied Clock.
+// Used in tests to inject a fake clock.
 func NewStoreWithClock(c Clock) *Store {
 	return &Store{
 		data:    make(map[string]Entry),
@@ -59,28 +46,38 @@ func NewStoreWithClock(c Clock) *Store {
 	}
 }
 
-// GET THE ENTRY FROM THE STORE BASED ON THE KEY
-// TODO: We need to remove the lazy delete from here!
+// Get returns the latest live entry for a key, if present.
+//
+// Policy: lazy-delete on expiry, history-agnostic.
+// - If key missing: returns (zero, false).
+// - If entry has no expiry (ExpiresAt.IsZero): return it.
+// - If expired (ExpiresAt <= now): delete from s.data and return (zero, false).
+// - Otherwise: return it.
+// Note: Get never reads or mutates s.history. Historical versions remain.
 func (s *Store) Get(key string) (Entry, bool) {
 	n := s.Clock.Now()
 	if entry, ok := s.data[key]; ok {
 		if entry.ExpiresAt.IsZero() {
-			return entry, ok
-		} else if entry.ExpiresAt.Before(n) || entry.ExpiresAt.Equal(n) {
-			delete(s.data, key)
-			return Entry{}, false
-		} else {
 			return entry, true
 		}
+		if entry.ExpiresAt.Before(n) || entry.ExpiresAt.Equal(n) {
+			delete(s.data, key) // lazy delete
+			return Entry{}, false
+		}
+		return entry, true
 	}
 	return Entry{}, false
 }
 
-// SET THE KEY IN THE STORE, IF KEY IN STORE UPDATE
+// Set writes a new value for a key without a TTL.
+// - New key: version=1, createdAt=updatedAt=now.
+// - Existing key: version++, createdAt unchanged, updatedAt=now.
+// Side effects:
+// - Updates s.data[key].
+// - Appends the new version to s.history[key].
 func (s *Store) Set(key string, value string) Entry {
 	n := s.Clock.Now()
 	if existing, ok := s.data[key]; ok {
-		// Existing key: bump version, update time, keep createdAt
 		newEntry := Entry{
 			Value:     value,
 			CreatedAt: existing.CreatedAt,
@@ -88,10 +85,9 @@ func (s *Store) Set(key string, value string) Entry {
 			Version:   existing.Version + 1,
 		}
 		s.data[key] = newEntry
+		s.history[key] = append(s.history[key], newEntry)
 		return newEntry
 	}
-
-	// New key: version 1, createdAt = updatedAt = now
 	newEntry := Entry{
 		Value:     value,
 		CreatedAt: n,
@@ -99,45 +95,49 @@ func (s *Store) Set(key string, value string) Entry {
 		Version:   1,
 	}
 	s.data[key] = newEntry
+	s.history[key] = append(s.history[key], newEntry)
 	return newEntry
 }
 
-// SET THE KEY IN STORE WITH TTL NOW
-func (s *Store) SetWithTTL(
-	key string,
-	value string,
-	ttl time.Duration,
-) Entry {
+// SetWithTTL writes a value with a TTL (time-to-live).
+// - ttl <= 0 → behaves like Set (no expiry).
+// - ttl > 0 → entry expires at now+ttl.
+// Versioning: same rules as Set.
+// Side effects:
+// - Updates s.data[key].
+// - Appends the new version (with ExpiresAt set/cleared) to s.history[key].
+func (s *Store) SetWithTTL(key string, value string, ttl time.Duration) Entry {
 	n := s.Clock.Now()
 	if ttl <= 0 {
-		ent := s.Set(key, value)
-		return ent
-	} else {
-		if existing, ok := s.data[key]; ok {
-			// Existing key: bump version, update time, keep createdAt
-			newEntry := Entry{
-				Value:     value,
-				CreatedAt: existing.CreatedAt,
-				UpdatedAt: n,
-				Version:   existing.Version + 1,
-				ExpiresAt: n.Add(ttl),
-			}
-			s.data[key] = newEntry
-			return newEntry
-		}
+		return s.Set(key, value)
+	}
+	if existing, ok := s.data[key]; ok {
 		newEntry := Entry{
 			Value:     value,
-			CreatedAt: n,
+			CreatedAt: existing.CreatedAt,
 			UpdatedAt: n,
-			Version:   1,
+			Version:   existing.Version + 1,
 			ExpiresAt: n.Add(ttl),
 		}
 		s.data[key] = newEntry
+		s.history[key] = append(s.history[key], newEntry)
 		return newEntry
 	}
+	newEntry := Entry{
+		Value:     value,
+		CreatedAt: n,
+		UpdatedAt: n,
+		Version:   1,
+		ExpiresAt: n.Add(ttl),
+	}
+	s.data[key] = newEntry
+	s.history[key] = append(s.history[key], newEntry)
+	return newEntry
 }
 
-// DELETE THE KEY FROM THE STORE
+// Delete removes a key from s.data (live snapshot).
+// Returns true if the key was present, false otherwise.
+// Note: history is not pruned; old versions remain.
 func (s *Store) Delete(key string) bool {
 	if _, ok := s.data[key]; ok {
 		delete(s.data, key)
@@ -146,47 +146,67 @@ func (s *Store) Delete(key string) bool {
 	return false
 }
 
-// LIST THE KEYS IN THE STORE
+// Keys returns the set of live keys in s.data.
+// Order is undefined.
 func (s *Store) Keys() []string {
 	keys := []string{}
-	for i := range s.data {
-		keys = append(keys, i)
+	for k := range s.data {
+		keys = append(keys, k)
 	}
 	return keys
 }
 
-// SIZE OF THE DATASTORE (# OF KEYS)
+// Size returns the number of live keys in s.data.
 func (s *Store) Size() int {
-	count := len(s.data)
-	return count
+	return len(s.data)
 }
 
-// COMPARE AND SET
+// CAS (Compare-And-Set) updates a value only if the current value matches
+// the expected string. Behavior:
+//   - If key missing: return false.
+//   - If expired: delete from s.data and return false (lazy delete semantics).
+//   - If value != expected: return false.
+//   - If value == expected: bump version, set UpdatedAt=now, preserve CreatedAt,
+//     preserve ExpiresAt, write newValue.
+//
+// Side effects:
+// - Updates s.data[key].
+// - Appends the new version to s.history[key].
 func (s *Store) CAS(key string, expected string, newValue string) bool {
-	if entry, ok := s.data[key]; ok {
-		if entry.Value == expected {
-			newEntry := Entry{
-				Value:     newValue,
-				CreatedAt: entry.CreatedAt,
-				UpdatedAt: s.Clock.Now(),
-				Version:   entry.Version + 1,
-			}
-			s.data[key] = newEntry
-			return true
-		}
+	n := s.Clock.Now()
+	entry, ok := s.data[key]
+	if !ok {
 		return false
 	}
-	return false
+	if !entry.ExpiresAt.IsZero() && (entry.ExpiresAt.Before(n) || entry.ExpiresAt.Equal(n)) {
+		delete(s.data, key) // lazy delete
+		return false
+	}
+	if entry.Value != expected {
+		return false
+	}
+	newEntry := Entry{
+		Value:     newValue,
+		CreatedAt: entry.CreatedAt,
+		UpdatedAt: n,
+		Version:   entry.Version + 1,
+		ExpiresAt: entry.ExpiresAt,
+	}
+	s.data[key] = newEntry
+	s.history[key] = append(s.history[key], newEntry)
+	return true
 }
 
-// BULD DELETE ANY AND ALL EXPIRED KEYS
+// SweepExpired scans s.data and deletes all entries whose ExpiresAt <= now.
+// Returns the count of keys removed.
+// Note: history is not pruned (versions remain).
 func (s *Store) SweepExpired() int {
 	n := s.Clock.Now()
 	removed := 0
-	for key, ents := range s.data {
-		if !ents.ExpiresAt.IsZero() && (ents.ExpiresAt.Before(n) || ents.ExpiresAt.Equal(n)) {
+	for key, entry := range s.data {
+		if !entry.ExpiresAt.IsZero() && (entry.ExpiresAt.Before(n) || entry.ExpiresAt.Equal(n)) {
 			delete(s.data, key)
-			removed += 1
+			removed++
 		}
 	}
 	return removed
