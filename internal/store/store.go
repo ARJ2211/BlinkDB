@@ -41,6 +41,7 @@ func NewStore() *Store {
 }
 
 // GET THE ENTRY FROM THE STORE BASED ON THE KEY
+// TODO: We need to remove the lazy delete from here!
 func (s *Store) Get(key string) (Entry, bool) {
 	n := s.Clock.Now()
 	if entry, ok := s.data[key]; ok {
