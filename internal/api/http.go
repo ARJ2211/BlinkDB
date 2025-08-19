@@ -41,8 +41,15 @@ func NewRouter(srv *Server) http.Handler {
 		}
 	})
 
-	// admin sweep route stays as-is...
-	// mux.HandleFunc("/v1/admin/sweep", ...)
+	// admin sweep route
+	mux.HandleFunc("/v1/admin/sweep", func(
+		w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w, []string{http.MethodPost})
+			return
+		}
+		srv.SweepExpired(w, r)
+	})
 
 	return mux
 }
