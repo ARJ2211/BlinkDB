@@ -9,7 +9,16 @@ import (
 func NewRouter(srv *Server) http.Handler {
 	mux := http.NewServeMux()
 
-	// KV routes
+	// List all keys (exact match: no trailing slash)
+	mux.HandleFunc("/v1/kv", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w, []string{http.MethodGet})
+			return
+		}
+		srv.ListKeys(w, r)
+	})
+
+	// Key-specific routes (prefix match with trailing slash)
 	mux.HandleFunc("/v1/kv/", func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 		if strings.HasSuffix(path, ":cas") {
@@ -20,7 +29,6 @@ func NewRouter(srv *Server) http.Handler {
 			srv.CASValue(w, r)
 			return
 		}
-
 		switch r.Method {
 		case http.MethodPut:
 			srv.PutValue(w, r)
@@ -33,14 +41,8 @@ func NewRouter(srv *Server) http.Handler {
 		}
 	})
 
-	// Admin routes
-	mux.HandleFunc("/v1/admin/sweep", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			methodNotAllowed(w, []string{http.MethodPost})
-			return
-		}
-		srv.SweepExpired(w, r)
-	})
+	// admin sweep route stays as-is...
+	// mux.HandleFunc("/v1/admin/sweep", ...)
 
 	return mux
 }

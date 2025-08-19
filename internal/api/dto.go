@@ -32,6 +32,12 @@ type DeleteResponse struct {
 	Entry EntryDTO `json:"entry"`
 }
 
+// KeysResponse is returned by GET /v1/kv (no key).
+type KeysResponse struct {
+	Keys []string `json:"keys"`
+	Size int      `json:"size"`
+}
+
 // SweepRequest is the body for POST /v1/admin/sweep.
 type SweepRequest struct {
 	Before string `json:"before,omitempty"` // optional RFC3339; default server "now"
