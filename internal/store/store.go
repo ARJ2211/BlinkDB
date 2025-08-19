@@ -29,6 +29,18 @@ type Store struct {
 	Clock   Clock              // time source (real or fake)
 }
 
+// makeTombstone creates a history tombstone from a live entry.
+func makeTombstone(prev Entry, now time.Time) Entry {
+	return Entry{
+		// Value is ignored for tombstones; keep empty.
+		CreatedAt: prev.CreatedAt, // policy: carry lineage
+		UpdatedAt: now,
+		Version:   prev.Version + 1,
+		ExpiresAt: time.Time{}, // must be zero
+		Deleted:   true,
+	}
+}
+
 // NewStore constructs a Store with a RealClock (wall time).
 func NewStore() *Store {
 	return &Store{
@@ -46,6 +58,16 @@ func NewStoreWithClock(c Clock) *Store {
 		history: make(map[string][]Entry),
 		Clock:   c,
 	}
+}
+
+// nextVersionFromHistory returns the next version number if the key has history,
+// otherwise 1 for a brand-new key (no prior lineage).
+func (s *Store) nextVersionFromHistory(key string) int64 {
+	h := s.history[key]
+	if len(h) == 0 {
+		return 1
+	}
+	return h[len(h)-1].Version + 1
 }
 
 // Get returns the latest live entry for a key, if present.
@@ -72,7 +94,7 @@ func (s *Store) Get(key string) (Entry, bool) {
 }
 
 // Set writes a new value for a key without a TTL.
-// - New key: version=1, createdAt=updatedAt=now.
+// - New key: version = nextVersionFromHistory(key), createdAt=updatedAt=now.
 // - Existing key: version++, createdAt unchanged, updatedAt=now.
 // Side effects:
 // - Updates s.data[key].
@@ -85,6 +107,8 @@ func (s *Store) Set(key string, value string) Entry {
 			CreatedAt: existing.CreatedAt,
 			UpdatedAt: n,
 			Version:   existing.Version + 1,
+			ExpiresAt: time.Time{}, // Set clears TTL
+			Deleted:   false,
 		}
 		s.data[key] = newEntry
 		s.history[key] = append(s.history[key], newEntry)
@@ -92,9 +116,11 @@ func (s *Store) Set(key string, value string) Entry {
 	}
 	newEntry := Entry{
 		Value:     value,
-		CreatedAt: n,
+		CreatedAt: n, // new lineage after missing/tombstone
 		UpdatedAt: n,
-		Version:   1,
+		Version:   s.nextVersionFromHistory(key),
+		ExpiresAt: time.Time{}, // no TTL
+		Deleted:   false,
 	}
 	s.data[key] = newEntry
 	s.history[key] = append(s.history[key], newEntry)
@@ -120,6 +146,7 @@ func (s *Store) SetWithTTL(key string, value string, ttl time.Duration) Entry {
 			UpdatedAt: n,
 			Version:   existing.Version + 1,
 			ExpiresAt: n.Add(ttl),
+			Deleted:   false,
 		}
 		s.data[key] = newEntry
 		s.history[key] = append(s.history[key], newEntry)
@@ -129,23 +156,28 @@ func (s *Store) SetWithTTL(key string, value string, ttl time.Duration) Entry {
 		Value:     value,
 		CreatedAt: n,
 		UpdatedAt: n,
-		Version:   1,
+		Version:   s.nextVersionFromHistory(key),
 		ExpiresAt: n.Add(ttl),
+		Deleted:   false,
 	}
 	s.data[key] = newEntry
 	s.history[key] = append(s.history[key], newEntry)
 	return newEntry
 }
 
-// Delete removes a key from s.data (live snapshot).
-// Returns true if the key was present, false otherwise.
-// Note: history is not pruned; old versions remain.
+// Delete removes a key and appends a tombstone in history if the key exists.
+// Returns true if the key was present (and a tombstone written), false otherwise.
+// Note: history is not pruned; tombstones and older versions remain.
 func (s *Store) Delete(key string) bool {
-	if _, ok := s.data[key]; ok {
-		delete(s.data, key)
-		return true
+	entry, ok := s.data[key]
+	if !ok {
+		return false
 	}
-	return false
+	now := s.Clock.Now()
+	tomb := makeTombstone(entry, now)
+	delete(s.data, key)
+	s.history[key] = append(s.history[key], tomb)
+	return true
 }
 
 // Keys returns the set of live keys in s.data.
@@ -169,7 +201,7 @@ func (s *Store) Size() int {
 //   - If expired: delete from s.data and return false (lazy delete semantics).
 //   - If value != expected: return false.
 //   - If value == expected: bump version, set UpdatedAt=now, preserve CreatedAt,
-//     preserve ExpiresAt, write newValue.
+//     preserve ExpiresAt (policy), write newValue.
 //
 // Side effects:
 // - Updates s.data[key].
@@ -192,7 +224,8 @@ func (s *Store) CAS(key string, expected string, newValue string) bool {
 		CreatedAt: entry.CreatedAt,
 		UpdatedAt: n,
 		Version:   entry.Version + 1,
-		ExpiresAt: entry.ExpiresAt,
+		ExpiresAt: entry.ExpiresAt, // policy: preserve TTL on CAS
+		Deleted:   false,
 	}
 	s.data[key] = newEntry
 	s.history[key] = append(s.history[key], newEntry)
@@ -219,33 +252,18 @@ func (s *Store) SweepExpired() int {
 // Snapshot semantics:
 //   - Reads from history[key] only (append-only, ordered by UpdatedAt).
 //   - Returns the most recent Entry with UpdatedAt <= t that was *alive at t*:
-//       AliveAt(t) := ExpiresAt.IsZero() || ExpiresAt.After(t)
+//     AliveAt(t) := ExpiresAt.IsZero() || ExpiresAt.After(t)
 //     (Note: if ExpiresAt == t the entry is NOT visible at t.)
+//   - Tombstones are barriers: if a Deleted==true entry has UpdatedAt <= t,
+//     older values are not visible for that t.
 //   - Pure read: does not mutate s.data or s.history.
 //
 // Search strategy (brief):
 //   - Binary search for the first index i with ents[i].UpdatedAt > t.
-//   - Start at i-1 (latest <= t) and scan left until AliveAt(t) holds.
-//   - Complexity: O(log N + K), where K is the number of expired-at-t
-//     versions you might skip.
-//
-// Examples (HH:MM):
-//   History:
-//     12:00 -> "A" (ExpiresAt = 12:03)
-//     12:05 -> "B" (no expiry)
-//
-//   GetWhen("k", 11:59) -> not found        // before first write
-//   GetWhen("k", 12:00) -> "A"              // exact match; A alive at 12:00
-//   GetWhen("k", 12:02) -> "A"              // A alive; 12:03 > 12:02
-//   GetWhen("k", 12:03) -> not found        // A expired at t (not visible)
-//   GetWhen("k", 12:04) -> not found        // between A’s expiry and B’s write
-//   GetWhen("k", 12:06) -> "B"              // latest <= t and alive
-//
-//   Same-timestamp tie:
-//     12:00 -> "A" (v1)
-//     12:00 -> "B" (v2, appended later)
-//   GetWhen("k", 12:00) -> "B"              // picks last appended at that time
-
+//   - Start at i-1 (latest <= t) and scan left until a non-deleted entry
+//     alive at t is found; if a tombstone with UpdatedAt <= t is encountered,
+//     return not found.
+//   - Complexity: O(log N + K).
 func (s *Store) GetWhen(key string, t time.Time) (Entry, bool) {
 	ents, ok := s.history[key]
 	if !ok || len(ents) == 0 {
@@ -269,13 +287,21 @@ func (s *Store) GetWhen(key string, t time.Time) (Entry, bool) {
 		return Entry{}, false
 	}
 
-	// Walk left from the candidate (idx-1) until we find one alive at t.
+	// Walk left from the candidate (idx-1) to honor tombstones and TTL at time t.
 	for i := idx - 1; i >= 0; i-- {
 		e := ents[i]
-		if e.ExpiresAt.IsZero() || e.ExpiresAt.After(t) {
+
+		// Tombstone barrier: if the delete happened at/ before t, nothing older is visible.
+		if e.Deleted && (e.UpdatedAt.Before(t) || e.UpdatedAt.Equal(t)) {
+			return Entry{}, false
+		}
+
+		// Live entry: visible at t iff no TTL or expiry strictly after t.
+		if !e.Deleted && (e.ExpiresAt.IsZero() || e.ExpiresAt.After(t)) {
 			return e, true
 		}
-		// else: this version had already expired at time t -> keep scanning left
+
+		// Else: either expired-by-t or (rare) a tombstone after t; continue left.
 	}
 
 	return Entry{}, false

@@ -702,3 +702,232 @@ func TestGetWhen_MissingKey(t *testing.T) {
 		t.Fatalf("expected missing key to return ok=false")
 	}
 }
+
+// Assumes helpers exist from earlier tests in this package:
+// - type FakeClock { now time.Time; Now(); Advance(d time.Duration) }
+// - func newTestStoreAt(t *testing.T, t0 time.Time) (*Store, *FakeClock)
+// - func advance(fc *FakeClock, d time.Duration)
+
+// --- tombstone behavior tests ---
+
+func TestDelete_AppendsSingleTombstone(t *testing.T) {
+	t0 := time.Date(2025, 8, 19, 12, 0, 0, 0, time.UTC)
+	s, fc := newTestStoreAt(t, t0)
+
+	e1 := s.Set("k", "A")
+	if e1.Version != 1 {
+		t.Fatalf("expect v1 after first Set, got v%d", e1.Version)
+	}
+	before := len(s.history["k"])
+
+	// Delete should remove from data and append exactly one tombstone
+	advance(fc, time.Minute)
+	if ok := s.Delete("k"); !ok {
+		t.Fatalf("expected Delete to return true for existing key")
+	}
+	after := len(s.history["k"])
+	if after != before+1 {
+		t.Fatalf("history length = %d, want %d (one tombstone appended)", after, before+1)
+	}
+
+	// Live map should not contain the key anymore
+	if _, ok := s.Get("k"); ok {
+		t.Fatalf("key should be absent in live map after Delete")
+	}
+
+	// Check tombstone fields
+	ts := s.history["k"][after-1]
+	if !ts.Deleted {
+		t.Fatalf("last history entry should be a tombstone (Deleted=true)")
+	}
+	if !ts.ExpiresAt.IsZero() {
+		t.Fatalf("tombstone ExpiresAt must be zero, got %v", ts.ExpiresAt)
+	}
+	if ts.Version != e1.Version+1 {
+		t.Fatalf("tombstone version = %d, want %d", ts.Version, e1.Version+1)
+	}
+	if !ts.UpdatedAt.After(e1.UpdatedAt) {
+		t.Fatalf("tombstone UpdatedAt should be after last live write")
+	}
+
+	// Second delete should be idempotent: false and no new tombstone
+	before2 := len(s.history["k"])
+	if ok := s.Delete("k"); ok {
+		t.Fatalf("second Delete should return false")
+	}
+	after2 := len(s.history["k"])
+	if after2 != before2 {
+		t.Fatalf("history changed on second Delete; before=%d after=%d", before2, after2)
+	}
+}
+
+func TestGetWhen_RespectsDeleteBarrier(t *testing.T) {
+	t0 := time.Date(2025, 8, 19, 12, 0, 0, 0, time.UTC)
+	s, fc := newTestStoreAt(t, t0)
+
+	_ = s.Set("k", "A")        // 12:00
+	advance(fc, 5*time.Minute) // 12:05
+	if ok := s.Delete("k"); !ok {
+		t.Fatalf("expected Delete to succeed")
+	}
+
+	// Before delete time → A visible
+	v, ok := s.GetWhen("k", t0.Add(4*time.Minute)) // 12:04
+	if !ok || v.Value != "A" {
+		t.Fatalf("expected A at 12:04, got (%q, ok=%v)", v.Value, ok)
+	}
+
+	// At delete time → not found
+	if _, ok := s.GetWhen("k", t0.Add(5*time.Minute)); ok { // 12:05
+		t.Fatalf("expected not found at delete time")
+	}
+
+	// After delete time → not found
+	if _, ok := s.GetWhen("k", t0.Add(6*time.Minute)); ok { // 12:06
+		t.Fatalf("expected not found after delete time")
+	}
+}
+
+func TestGetWhen_DeleteThenRecreate(t *testing.T) {
+	t0 := time.Date(2025, 8, 19, 12, 0, 0, 0, time.UTC)
+	s, fc := newTestStoreAt(t, t0)
+
+	e1 := s.Set("k", "A") // v1 @ 12:00
+	advance(fc, 5*time.Minute)
+	if ok := s.Delete("k"); !ok {
+		t.Fatalf("expected Delete to succeed")
+	}
+	// Between delete and next set → not found
+	if _, ok := s.GetWhen("k", t0.Add(6*time.Minute)); ok {
+		t.Fatalf("expected not found between delete and recreate")
+	}
+
+	advance(fc, 2*time.Minute) // 12:07
+	e3 := s.Set("k", "B")      // recreate
+
+	// Versions should be monotonic across tombstone: v1 (A), v2 (tombstone), v3 (B)
+	if e3.Version != e1.Version+2 {
+		t.Fatalf("recreated Set version = %d, want %d", e3.Version, e1.Version+2)
+	}
+
+	// At/after recreate time → B visible
+	v, ok := s.GetWhen("k", e3.UpdatedAt)
+	if !ok || v.Value != "B" {
+		t.Fatalf("expected B at recreate time, got (%q, ok=%v)", v.Value, ok)
+	}
+	v, ok = s.GetWhen("k", e3.UpdatedAt.Add(time.Minute))
+	if !ok || v.Value != "B" {
+		t.Fatalf("expected B after recreate, got (%q, ok=%v)", v.Value, ok)
+	}
+}
+
+func TestGetWhen_TombstoneBeatsUnexpiredOlderValues(t *testing.T) {
+	t0 := time.Date(2025, 8, 19, 12, 0, 0, 0, time.UTC)
+	s, fc := newTestStoreAt(t, t0)
+
+	// A has long TTL (would still be alive after 3m)
+	_ = s.SetWithTTL("k", "A", 10*time.Minute) // expires 12:10
+	advance(fc, 3*time.Minute)                 // 12:03
+	if ok := s.Delete("k"); !ok {
+		t.Fatalf("expected Delete to succeed")
+	}
+
+	// Even though A's TTL would still be active at 12:04, the tombstone at 12:03 blocks it
+	if _, ok := s.GetWhen("k", t0.Add(4*time.Minute)); ok { // 12:04
+		t.Fatalf("expected not found due to tombstone barrier at 12:03")
+	}
+}
+
+func TestDelete_AfterAlreadyExpired_AppendsTombstone(t *testing.T) {
+	t0 := time.Date(2025, 8, 19, 12, 0, 0, 0, time.UTC)
+	s, fc := newTestStoreAt(t, t0)
+
+	_ = s.SetWithTTL("k", "A", time.Minute) // expires 12:01
+	advance(fc, 2*time.Minute)              // 12:02 (expired in live map but still present until Get/Sweep)
+
+	before := len(s.history["k"])
+	if ok := s.Delete("k"); !ok {
+		t.Fatalf("expected Delete to succeed even if value is already expired")
+	}
+	after := len(s.history["k"])
+	if after != before+1 {
+		t.Fatalf("expected one tombstone appended; before=%d after=%d", before, after)
+	}
+
+	// Time-travel at 12:02 should be not found due to delete barrier
+	if _, ok := s.GetWhen("k", t0.Add(2*time.Minute)); ok {
+		t.Fatalf("expected not found at/after delete time")
+	}
+
+	// Live map should be empty for k
+	if _, ok := s.Get("k"); ok {
+		t.Fatalf("expected key absent in live map after delete")
+	}
+}
+
+func TestSet_AfterTombstone_UsesNextVersionAndClearsTTL(t *testing.T) {
+	t0 := time.Date(2025, 8, 19, 12, 0, 0, 0, time.UTC)
+	s, fc := newTestStoreAt(t, t0)
+
+	e1 := s.SetWithTTL("k", "A", time.Minute) // v1
+	advance(fc, 30*time.Second)
+	if ok := s.Delete("k"); !ok {
+		t.Fatalf("expected Delete to succeed")
+	}
+	advance(fc, 30*time.Second)
+	e3 := s.Set("k", "B") // should be v3, no TTL
+
+	if e3.Version != e1.Version+2 {
+		t.Fatalf("expected version to jump to v3 after tombstone, got v%d", e3.Version)
+	}
+	if !e3.ExpiresAt.IsZero() {
+		t.Fatalf("Set after tombstone should clear TTL; got ExpiresAt=%v", e3.ExpiresAt)
+	}
+	if e3.Deleted {
+		t.Fatalf("Set must create live entries (Deleted=false)")
+	}
+}
+
+func TestCAS_PreservesTTL_AndIsLiveEntry(t *testing.T) {
+	t0 := time.Date(2025, 8, 19, 12, 0, 0, 0, time.UTC)
+	s, fc := newTestStoreAt(t, t0)
+
+	e1 := s.SetWithTTL("k", "A", 5*time.Minute)
+	if e1.ExpiresAt.IsZero() {
+		t.Fatalf("precondition: expected non-zero ExpiresAt")
+	}
+
+	// Advance a bit and CAS successfully
+	advance(fc, time.Minute)
+	if ok := s.CAS("k", "A", "B"); !ok {
+		t.Fatalf("CAS should succeed")
+	}
+	e2, ok := s.Get("k")
+	if !ok {
+		t.Fatalf("expected key present after CAS")
+	}
+	if e2.Deleted {
+		t.Fatalf("CAS must create live entries (Deleted=false)")
+	}
+	// TTL preserved per policy
+	if !e2.ExpiresAt.Equal(e1.ExpiresAt) {
+		t.Fatalf("CAS should preserve TTL; want %v, got %v", e1.ExpiresAt, e2.ExpiresAt)
+	}
+}
+
+func TestGetWhen_TombstoneAtSameTimestampWins(t *testing.T) {
+	// If Set and Delete occur with identical UpdatedAt (no clock advance),
+	// time-travel at that instant should see the delete (not found).
+	t0 := time.Date(2025, 8, 19, 12, 0, 0, 0, time.UTC)
+	s, _ := newTestStoreAt(t, t0)
+
+	_ = s.Set("k", "A")
+	// No advance of the fake clock → same UpdatedAt
+	if ok := s.Delete("k"); !ok {
+		t.Fatalf("expected Delete to succeed")
+	}
+
+	if _, ok := s.GetWhen("k", t0); ok {
+		t.Fatalf("expected not found at same timestamp due to tombstone order")
+	}
+}
