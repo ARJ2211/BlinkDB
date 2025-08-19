@@ -354,6 +354,101 @@ func TestDELETE_SecondTime_404(t *testing.T) {
 	}
 }
 
+func TestCAS_Success_NoTTL_200(t *testing.T) {
+	t0 := time.Date(2025, 8, 19, 12, 0, 0, 0, time.UTC)
+	st, router := newTestHTTP(t, t0)
+
+	e := st.Set("k", "A") // v1
+
+	body := mustJSON(t, CASRequest{ExpectedVersion: e.Version, Value: "B"})
+	req := httptest.NewRequest(http.MethodPost, "/v1/kv/k:cas", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200", rec.Code)
+	}
+	var got EntryDTO
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Value != "B" || got.Version != e.Version+1 {
+		t.Fatalf("want value=B, version=%d; got value=%q, version=%d", e.Version+1, got.Value, got.Version)
+	}
+	if got.ExpiresAt != "" {
+		t.Fatalf("no TTL expected, got expiresAt=%q", got.ExpiresAt)
+	}
+}
+
+func TestCAS_Conflict_409(t *testing.T) {
+	t0 := time.Date(2025, 8, 19, 12, 0, 0, 0, time.UTC)
+	st, router := newTestHTTP(t, t0)
+
+	e := st.Set("k", "A") // v1
+
+	// stale expectedVersion (v1), but first make it v2
+	st.Set("k", "B")
+
+	body := mustJSON(t, CASRequest{ExpectedVersion: e.Version, Value: "C"})
+	req := httptest.NewRequest(http.MethodPost, "/v1/kv/k:cas", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status=%d, want 409", rec.Code)
+	}
+}
+
+func TestCAS_Missing_404(t *testing.T) {
+	_, router := newTestHTTP(t, time.Now().UTC())
+
+	body := mustJSON(t, CASRequest{ExpectedVersion: 1, Value: "X"})
+	req := httptest.NewRequest(http.MethodPost, "/v1/kv/miss:cas", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status=%d, want 404", rec.Code)
+	}
+}
+
+func TestCAS_Tombstoned_404(t *testing.T) {
+	t0 := time.Date(2025, 8, 19, 12, 0, 0, 0, time.UTC)
+	st, router := newTestHTTP(t, t0)
+
+	st.Set("z", "A")
+	ok := st.Delete("z")
+	if !ok {
+		t.Fatalf("precondition: delete should succeed")
+	}
+
+	body := mustJSON(t, CASRequest{ExpectedVersion: 1, Value: "B"})
+	req := httptest.NewRequest(http.MethodPost, "/v1/kv/z:cas", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status=%d, want 404", rec.Code)
+	}
+}
+
+func TestCAS_BadJSON_400(t *testing.T) {
+	_, router := newTestHTTP(t, time.Now().UTC())
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/kv/x:cas", bytes.NewBufferString(`{"expectedVersion":"not-an-int","value":"B"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400", rec.Code)
+	}
+}
+
 // --- helpers ---
 
 func containsIn(s, substr string) bool {

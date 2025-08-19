@@ -130,12 +130,59 @@ func (srv *Server) GetValue(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, dto)
 }
 
+// CASValue: POST /v1/kv/{key}:cas
+// Body: { "expectedVersion": <int>, "value": "<string>" }
+// Behavior:
+//   - 200 on success (TTL preserved)
+//   - 404 if key missing/expired/tombstoned
+//   - 409 if expectedVersion != current version
 func (srv *Server) CASValue(w http.ResponseWriter, r *http.Request) {
-	if _, ok := getKey(r); !ok {
+	key, ok := getKey(r)
+	if !ok || key == "" {
 		writeError(w, http.StatusBadRequest, "missing key")
 		return
 	}
-	writeError(w, http.StatusNotImplemented, "not implemented")
+
+	var req CASRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad JSON body")
+		return
+	}
+	if req.Value == "" {
+		writeError(w, http.StatusBadRequest, "value is required")
+		return
+	}
+
+	// quick existence check (treat tombstone/expired as not found)
+	if _, found := srv.S.Get(key); !found {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+
+	updated, ok := srv.S.CASVersion(key, req.ExpectedVersion, req.Value)
+	if !ok {
+		// Distinguish conflict (version mismatch) vs "became not found" (expired/raced)
+		if _, still := srv.S.Get(key); still {
+			writeError(w, http.StatusConflict, "version conflict")
+		} else {
+			writeError(w, http.StatusNotFound, "not found")
+		}
+		return
+	}
+
+	// success → 200, TTL preserved by store
+	dto := EntryDTO{
+		Key:       key,
+		Value:     updated.Value,
+		Version:   updated.Version,
+		CreatedAt: updated.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt: updated.UpdatedAt.UTC().Format(time.RFC3339),
+		Deleted:   updated.Deleted,
+	}
+	if !updated.ExpiresAt.IsZero() {
+		dto.ExpiresAt = updated.ExpiresAt.UTC().Format(time.RFC3339)
+	}
+	writeJSON(w, http.StatusOK, dto)
 }
 
 func (srv *Server) DeleteValue(w http.ResponseWriter, r *http.Request) {
