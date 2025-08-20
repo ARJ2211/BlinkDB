@@ -197,6 +197,55 @@ curl -s 'http://localhost:8080/v1/kv'
 
 ---
 
+#### GET `/v1/admin/history/{key}` — Full append-only history
+
+- Returns the **entire history** of `{key}` in chronological order (writes + tombstones).
+- **Pure read**: does not lazy-expire or mutate state.
+- **200** with `{ "key": "<key>", "history": [EntryDTO...] }`
+- **404** if no history exists for the key (even if it’s currently absent).
+
+**Example:**
+
+```bash
+curl -s 'http://localhost:8080/v1/admin/history/user:1'
+```
+
+Response example:
+
+```json
+{
+  "key": "user:1",
+  "history": [
+    {
+      "key": "user:1",
+      "value": "Alice",
+      "version": 1,
+      "createdAt": "2025-08-19T12:00:00Z",
+      "updatedAt": "2025-08-19T12:00:00Z",
+      "deleted": false
+    },
+    {
+      "key": "user:1",
+      "value": "Alice*",
+      "version": 2,
+      "createdAt": "2025-08-19T12:00:00Z",
+      "updatedAt": "2025-08-19T12:03:00Z",
+      "expiresAt": "2025-08-19T12:05:00Z",
+      "deleted": false
+    },
+    {
+      "key": "user:1",
+      "version": 3,
+      "createdAt": "2025-08-19T12:00:00Z",
+      "updatedAt": "2025-08-19T12:06:00Z",
+      "deleted": true
+    }
+  ]
+}
+```
+
+---
+
 #### PUT `/v1/kv/{key}` — Create/Update with TTL rules
 
 - **Body**: `PutValueRequest`
