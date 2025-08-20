@@ -11,7 +11,7 @@ A compact, test-driven **Go** key–value store that keeps **full per-key histor
 > **Status**  
 > ✅ Store layer (**1E**) complete: versions, TTL, CAS, append-only history, `GetWhen` snapshot semantics, tombstones.  
 > ✅ HTTP API built: PUT / GET / GET?at / **GET (list keys)** / DELETE / CAS / SWEEP.  
-> ⏭ Next (1D): add `RWMutex` for concurrency.
+> ⏭ Next (1F): add `RWMutex` for concurrency.
 
 ---
 
