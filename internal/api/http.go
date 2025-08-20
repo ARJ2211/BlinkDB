@@ -51,5 +51,14 @@ func NewRouter(srv *Server) http.Handler {
 		srv.SweepExpired(w, r)
 	})
 
+	// get key history route
+	mux.HandleFunc("/v1/admin/history/{key}", func(
+		w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w, []string{http.MethodGet})
+		}
+		srv.GetHistoryEnts(w, r)
+	})
+
 	return mux
 }

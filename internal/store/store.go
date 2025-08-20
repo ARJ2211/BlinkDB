@@ -91,6 +91,21 @@ func (s *Store) Get(key string) (Entry, bool) {
 	return Entry{}, false
 }
 
+// GetHistory returns the full, append-only history for key in chronological
+// write order (UpdatedAt ascending). The history includes all successful
+// Set/SetWithTTL/CAS writes (Deleted=false) and explicit deletes as tombstones
+// (Deleted=true, ExpiresAt=zero).
+func (s *Store) GetHistory(key string) ([]Entry, bool) {
+	hist, ok := s.history[key]
+	if !ok || len(hist) == 0 {
+		return nil, false
+	}
+	// defensive copy
+	out := make([]Entry, len(hist))
+	copy(out, hist)
+	return out, true
+}
+
 // Set writes a new value for a key without a TTL.
 // - New key: version = nextVersionFromHistory(key), createdAt=updatedAt=now.
 // - Existing key: version++, createdAt unchanged, updatedAt=now.

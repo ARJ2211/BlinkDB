@@ -210,6 +210,46 @@ func (srv *Server) GetValue(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, dto)
 }
 
+// ---------- GET /v1/history/{key} ----------
+// Returns the full append-only history of {key} in chronological order.
+// Includes live writes (Deleted=false) and tombstones (Deleted=true, ExpiresAt omitted).
+// 200: { "key": "...", "history": [EntryDTO...] }
+// 404: { "error": "not found" } if the key has no recorded history.
+func (srv *Server) GetHistoryEnts(w http.ResponseWriter, r *http.Request) {
+	key, ok := getKeyHistory(r)
+	if !ok || key == "" {
+		writeError(w, http.StatusBadRequest, "missing key")
+		return
+	}
+
+	ents, has := srv.S.GetHistory(key)
+	if !has {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+
+	histories := make([]EntryDTO, 0, len(ents))
+	for _, ent := range ents {
+		dto := EntryDTO{
+			Key:       key, // avoid "key": "" in JSON
+			Value:     ent.Value,
+			Version:   ent.Version,
+			CreatedAt: ent.CreatedAt.UTC().Format(time.RFC3339),
+			UpdatedAt: ent.UpdatedAt.UTC().Format(time.RFC3339),
+			Deleted:   ent.Deleted,
+		}
+		if !ent.ExpiresAt.IsZero() {
+			dto.ExpiresAt = ent.ExpiresAt.UTC().Format(time.RFC3339)
+		}
+		histories = append(histories, dto)
+	}
+
+	writeJSON(w, http.StatusOK, HistoryResponse{
+		Key:     key,
+		History: histories,
+	})
+}
+
 // ---------- POST /v1/kv/{key}:cas ----------
 //
 // CASValue performs a Compare-And-Swap using the current version.

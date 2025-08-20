@@ -12,6 +12,12 @@ type EntryDTO struct {
 	Deleted   bool   `json:"deleted"`             // true for tombstones
 }
 
+// HistroyResponse is returned by GET /v1/admin/history/{keys}
+type HistoryResponse struct {
+	Key     string     `json:"key"`
+	History []EntryDTO `json:"history"`
+}
+
 // PutValueRequest is the body for PUT /v1/kv/{key}.
 type PutValueRequest struct {
 	Value      string `json:"value"`                // required

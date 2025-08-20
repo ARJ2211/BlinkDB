@@ -33,6 +33,15 @@ func getKey(r *http.Request) (string, bool) {
 	return rest, true
 }
 
+// getKey extracts the {key} from paths like /v1/admin/history/{key}
+func getKeyHistory(r *http.Request) (string, bool) {
+	rest := strings.TrimPrefix(r.URL.Path, "/v1/admin/history/")
+	if rest == "" {
+		return "", false
+	}
+	return rest, true
+}
+
 // hasAll reports whether 'have' contains every key in 'want' (order ignored).
 func hasAll(have []string, want ...string) bool {
 	set := make(map[string]struct{}, len(have))
