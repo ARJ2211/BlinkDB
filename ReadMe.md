@@ -112,6 +112,7 @@ POST   /v1/admin/sweep
 ---
 
 ## HTTP API
+For more info click [here](https://github.com/ARJ2211/BlinkDB/blob/5c499dd33948aa3b6cdb5817d96731929b7ffe3c/docs/api.md)
 
 ### Conventions
 
