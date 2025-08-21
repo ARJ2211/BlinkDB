@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -731,6 +732,144 @@ func TestGET_At_BadFormat_400(t *testing.T) {
 	}
 }
 
+func TestHistory_NotFound_404(t *testing.T) {
+	_, router := newTestHTTP(t, time.Date(2025, 8, 19, 12, 0, 0, 0, time.UTC))
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/history/missing", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status=%d, want 404", rec.Code)
+	}
+}
+
+func TestHistory_FullAppendOnly_200(t *testing.T) {
+	t0 := time.Date(2025, 8, 19, 12, 0, 0, 0, time.UTC)
+	st, router := newTestHTTP(t, t0)
+
+	// Build history: v1 Set, v2 SetWithTTL, v3 Delete, v4 Set (new lineage)
+	st.Set("k", "A")
+	st.SetWithTTL("k", "B", time.Minute)
+	st.Delete("k")
+	st.Set("k", "C")
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/history/k", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200", rec.Code)
+	}
+
+	var got HistoryResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if got.Key != "k" {
+		t.Fatalf("key=%q, want k", got.Key)
+	}
+	if len(got.History) != 4 {
+		t.Fatalf("history length=%d, want 4", len(got.History))
+	}
+
+	// v1
+	if got.History[0].Version != 1 || got.History[0].Value != "A" || got.History[0].Deleted {
+		t.Fatalf("v1 mismatch: %+v", got.History[0])
+	}
+	// v2 (has TTL → expiresAt present)
+	if got.History[1].Version != 2 || got.History[1].Value != "B" || got.History[1].Deleted {
+		t.Fatalf("v2 mismatch: %+v", got.History[1])
+	}
+	if got.History[1].ExpiresAt == "" {
+		t.Fatalf("v2 should include expiresAt (TTL), got empty")
+	}
+	// v3 tombstone (no value / expiresAt)
+	if got.History[2].Version != 3 || !got.History[2].Deleted {
+		t.Fatalf("v3 tombstone mismatch: %+v", got.History[2])
+	}
+	if got.History[2].Value != "" {
+		t.Fatalf("tombstone should omit value, got %q", got.History[2].Value)
+	}
+	if got.History[2].ExpiresAt != "" {
+		t.Fatalf("tombstone should omit expiresAt, got %q", got.History[2].ExpiresAt)
+	}
+	// v4
+	if got.History[3].Version != 4 || got.History[3].Value != "C" || got.History[3].Deleted {
+		t.Fatalf("v4 mismatch: %+v", got.History[3])
+	}
+
+	// Basic timestamp format checks (RFC3339)
+	for i, e := range got.History {
+		mustRFC3339(t, e.CreatedAt)
+		mustRFC3339(t, e.UpdatedAt)
+		if e.ExpiresAt != "" {
+			mustRFC3339(t, e.ExpiresAt)
+		}
+		if e.Version <= 0 {
+			t.Fatalf("entry %d has non-positive version: %d", i, e.Version)
+		}
+	}
+}
+
+func TestHistory_URLDecodedKey(t *testing.T) {
+	t0 := time.Date(2025, 8, 19, 12, 0, 0, 0, time.UTC)
+	st, router := newTestHTTP(t, t0)
+
+	origKey := "a/b c" // slash + space
+	// Write a couple of versions
+	st.Set(origKey, "X")
+	st.Set(origKey, "Y")
+
+	// URL-encode the key in the path
+	pathKey := url.PathEscape(origKey) // "a%2Fb%20c"
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/history/"+pathKey, nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200", rec.Code)
+	}
+
+	var got HistoryResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Key != origKey {
+		t.Fatalf("decoded key=%q, want %q", got.Key, origKey)
+	}
+	if len(got.History) != 2 {
+		t.Fatalf("history length=%d, want 2", len(got.History))
+	}
+	if got.History[1].Value != "Y" {
+		t.Fatalf("latest value=%q, want Y", got.History[1].Value)
+	}
+}
+
+func TestHistory_OmitsExpiresAtWhenZero(t *testing.T) {
+	t0 := time.Date(2025, 8, 19, 12, 0, 0, 0, time.UTC)
+	st, router := newTestHTTP(t, t0)
+
+	st.Set("noTTL", "A") // no TTL
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/history/noTTL", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200", rec.Code)
+	}
+	var got HistoryResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	if len(got.History) != 1 {
+		t.Fatalf("history length=%d, want 1", len(got.History))
+	}
+	if got.History[0].ExpiresAt != "" {
+		t.Fatalf("expiresAt should be omitted when zero, got %q", got.History[0].ExpiresAt)
+	}
+}
+
 // --- helpers ---
 
 func containsIn(s, substr string) bool {
@@ -774,4 +913,14 @@ func newTestHTTPWithClock(t *testing.T, t0 time.Time) (*store.Store, http.Handle
 	st := store.NewStoreWithClock(fc)
 	srv := NewServer(st)
 	return st, NewRouter(srv), fc
+}
+
+func mustRFC3339(t *testing.T, s string) {
+	t.Helper()
+	if s == "" {
+		t.Fatalf("timestamp must be non-empty RFC3339")
+	}
+	if _, err := time.Parse(time.RFC3339, s); err != nil {
+		t.Fatalf("bad RFC3339 time %q: %v", s, err)
+	}
 }
