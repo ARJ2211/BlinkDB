@@ -228,16 +228,21 @@ func (s *Store) Delete(key string) bool {
 // Keys returns the set of live keys in s.data.
 // Order is undefined.
 func (s *Store) Keys() []string {
+	s.mu.RLock()
 	keys := []string{}
 	for k := range s.data {
 		keys = append(keys, k)
 	}
+	s.mu.RUnlock()
 	return keys
 }
 
 // Size returns the number of live keys in s.data.
 func (s *Store) Size() int {
-	return len(s.data)
+	s.mu.RLock()
+	n := len(s.data)
+	s.mu.RUnlock()
+	return n
 }
 
 // CASVersion updates key to newValue only if the current live version matches expectedVersion.
