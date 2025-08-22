@@ -2,6 +2,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"net/http"
 	"os"
@@ -43,7 +44,7 @@ func clearTerminal() {
 
 func printMiniBanner(addr string) {
 	fmt.Print(banner)
-	fmt.Printf("%sBlinkDB%s at %shttp://localhost%s%s\n\n",
+	fmt.Printf("%sBlinkDB%s listening at %shttp://localhost%s%s\n\n",
 		ansiBold, ansiReset, ansiGreen, addr, ansiReset)
 
 	fmt.Println(ansiDim + "Endpoints:" + ansiReset)
@@ -67,7 +68,11 @@ func printMiniBanner(addr string) {
 
 func main() {
 	clearTerminal()
-	addr := ":8080"
+	// Define a flag for port
+	port := flag.String("port", "8080", "Port to run the server on")
+	flag.Parse()
+
+	addr := ":" + *port
 	printMiniBanner(addr)
 
 	// Store + API
