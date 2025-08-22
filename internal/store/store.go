@@ -334,7 +334,7 @@ func (s *Store) GetWhen(key string, t time.Time) (Entry, bool) {
 	l, r := 0, len(cp) // search space is [l, r)
 	for l < r {
 		mid := l + (r-l)/2
-		if ents[mid].UpdatedAt.After(t) {
+		if cp[mid].UpdatedAt.After(t) {
 			r = mid // answer is in [l, mid)
 		} else {
 			l = mid + 1 // answer is in (mid, r)
@@ -349,7 +349,7 @@ func (s *Store) GetWhen(key string, t time.Time) (Entry, bool) {
 
 	// Walk left from the candidate (idx-1) to honor tombstones and TTL at time t.
 	for i := idx - 1; i >= 0; i-- {
-		e := ents[i]
+		e := cp[i]
 
 		// Tombstone barrier: if the delete happened at/ before t, nothing older is visible.
 		if e.Deleted && (e.UpdatedAt.Before(t) || e.UpdatedAt.Equal(t)) {
