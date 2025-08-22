@@ -12,7 +12,8 @@ A compact, test-driven **Go** key–value store that keeps **full per-key histor
 > ✅ Store layer (**1E**) complete: versions, TTL, CAS, append-only history, `GetWhen` snapshot semantics, tombstones.  
 > ✅ HTTP API built: PUT / GET / GET?at / **GET (list keys)** / DELETE / CAS / SWEEP.  
 > ✅ Store made goroutine-safe with `sync.RWMutex` (1G).  
-> ⏭ Next: background sweepers and persistence.
+> ✅ Background sweepers and persistence.
+> ⏭ Next: persistence (WAL/snapshots or pluggable engines).
 
 ---
 
