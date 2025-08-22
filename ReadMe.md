@@ -1,5 +1,5 @@
 <p align="center">
-<img src="https://github.com/ARJ2211/BlinkDB/blob/main/assets/blink_logo.png?raw=true" alt="logo" width="300" height="300"/>
+<img src="https://github.com/ARJ2211/BlinkDB/blob/main/assets/blink_logov2.jpg?raw=true" alt="logo" width="700" height="300"/>
 </p>
 
 # 🧠 BlinkDB — Versioned, Time-Traveling, In-Memory KV (TTL, CAS, Tombstones)
