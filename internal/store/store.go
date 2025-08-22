@@ -176,19 +176,20 @@ func (s *Store) SetWithTTL(
 	key string,
 	value string,
 	ttl time.Duration) Entry {
-	n := s.Clock.Now()
 	if ttl <= 0 {
 		return s.Set(key, value)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	n := s.Clock.Now()
+	exp := n.Add(ttl)
 	if existing, ok := s.data[key]; ok {
 		newEntry := Entry{
 			Value:     value,
 			CreatedAt: existing.CreatedAt,
 			UpdatedAt: n,
 			Version:   existing.Version + 1,
-			ExpiresAt: n.Add(ttl),
+			ExpiresAt: exp,
 			Deleted:   false,
 		}
 		s.data[key] = newEntry
@@ -200,7 +201,7 @@ func (s *Store) SetWithTTL(
 		CreatedAt: n,
 		UpdatedAt: n,
 		Version:   s.nextVersionFromHistory(key),
-		ExpiresAt: n.Add(ttl),
+		ExpiresAt: exp,
 		Deleted:   false,
 	}
 	s.data[key] = newEntry
