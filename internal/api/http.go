@@ -40,6 +40,8 @@ func NewRouter(srv *Server) http.Handler {
 			methodNotAllowed(w, []string{http.MethodPut, http.MethodGet, http.MethodDelete})
 		}
 	})
+	// call sweep in intervals and get stats
+	mux.HandleFunc("/v1/admin/sweep-stats", srv.HandleSweepStats)
 
 	// admin sweep route
 	mux.HandleFunc("/v1/admin/sweep", func(

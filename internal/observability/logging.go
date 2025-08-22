@@ -53,6 +53,23 @@ func colorMethod(m string) string {
 	}
 }
 
+const (
+	ansiDim   = "\x1b[2m"
+	ansiGreen = "\x1b[32m"
+	ansiCyan  = "\x1b[36m"
+	ansiReset = "\x1b[0m"
+)
+
+func LogSweeper(every time.Duration, removed int, dur time.Duration) {
+	ts := time.Now().UTC().Format("2006/01/02 15:04:05")
+	countColor := ansiGreen
+	if removed == 0 {
+		countColor = ansiDim
+	}
+	fmt.Printf("%s %sSWEEP%s  interval=%s  %sremoved=%d%s  %s(%s)%s\n",
+		dim(ts), ansiCyan, ansiReset, every, countColor, removed, ansiReset, ansiDim, dur, ansiReset)
+}
+
 // PrettyHTTPLogger logs a human-friendly, colorized single line per request.
 func PrettyHTTPLogger() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
