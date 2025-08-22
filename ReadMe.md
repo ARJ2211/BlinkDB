@@ -11,7 +11,8 @@ A compact, test-driven **Go** key–value store that keeps **full per-key histor
 > **Status**  
 > ✅ Store layer (**1E**) complete: versions, TTL, CAS, append-only history, `GetWhen` snapshot semantics, tombstones.  
 > ✅ HTTP API built: PUT / GET / GET?at / **GET (list keys)** / DELETE / CAS / SWEEP.  
-> ⏭ Next (1F): add `RWMutex` for concurrency.
+> ✅ Store made goroutine-safe with `sync.RWMutex` (1G).  
+> ⏭ Next: background sweepers and persistence.
 
 ---
 
@@ -28,8 +29,9 @@ A compact, test-driven **Go** key–value store that keeps **full per-key histor
 6. [Project Structure](#project-structure)
 7. [Testing](#testing)
 8. [Design Notes](#design-notes)
-9. [Roadmap](#roadmap)
-10. [FAQ](#faq)
+9. [Concurreny & Locks](#concurrency--locks)
+10. [Roadmap](#roadmap)
+11. [FAQ](#faq)
 
 ---
 
@@ -95,6 +97,14 @@ Start (typical):
 
 ```bash
 go run ./cmd/server
+
+```
+
+Or choose a custom port
+
+```bash
+go run ./cmd/server --port 9000
+
 ```
 
 Then hit (default router prefix):
@@ -112,6 +122,7 @@ POST   /v1/admin/sweep
 ---
 
 ## HTTP API
+
 For more info click [here](https://github.com/ARJ2211/BlinkDB/blob/5c499dd33948aa3b6cdb5817d96731929b7ffe3c/docs/api.md)
 
 ### Conventions
@@ -451,6 +462,37 @@ go test -race ./...
 - **Tombstones** ensure deletes are visible in history and act as time-travel barriers.
 - **CAS preserves TTL** by design (clearly tested & documented).
 - **Lazy vs eager expiry**: we chose lazy expiry on reads for hot-path simplicity; `SweepExpired` provides explicit cleanup.
+
+---
+
+## Concurrency & Locks
+
+Starting with milestone **1G**, the store is fully goroutine-safe.
+
+### How it works
+
+- **RWMutex** wraps all access:
+  - **Readers** (`Get`, `Keys`, `GetHistory`, `GetWhen`) use `RLock`.
+  - **Writers** (`Set`, `SetWithTTL`, `Delete`, `CASVersion`, `SweepExpired`) use `Lock`.
+- **Get** has a special upgrade path:
+  - Reads under `RLock`.
+  - If expired, it releases `RLock` → takes `Lock` → re-checks expiry before deleting.
+- **GetWhen** copies the history slice under `RLock` and searches it after unlocking, ensuring a consistent snapshot.
+- **CAS** increments version and appends to history atomically under `Lock`.
+- **Delete** appends exactly one tombstone under `Lock`.
+- **SweepExpired** deletes expired keys under `Lock` but does not append tombstones.
+
+### Why this matters
+
+- Multiple HTTP requests already run concurrently (each handler is a goroutine).
+- Locks prevent map read/write panics and keep history/versions strictly ordered.
+- Readers don’t block each other, but writers serialize correctly.
+
+**Run tests with the race detector to validate:**
+
+```bash
+go test -race ./...
+```
 
 ---
 
