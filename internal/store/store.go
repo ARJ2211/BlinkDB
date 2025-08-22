@@ -249,6 +249,9 @@ func (s *Store) Size() int {
 // Returns the updated entry and true on success; zero Entry and false otherwise.
 // Policy: preserves existing TTL (ExpiresAt), does not modify CreatedAt, bumps Version and UpdatedAt.
 func (s *Store) CASVersion(key string, expectedVersion int64, newValue string) (Entry, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	n := s.Clock.Now()
 
 	cur, ok := s.data[key]
@@ -286,6 +289,8 @@ func (s *Store) CASVersion(key string, expectedVersion int64, newValue string) (
 // Returns the count of keys removed.
 // Note: history is not pruned (versions remain).
 func (s *Store) SweepExpired() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	n := s.Clock.Now()
 	removed := 0
 	for key, entry := range s.data {
@@ -315,13 +320,18 @@ func (s *Store) SweepExpired() int {
 //     return not found.
 //   - Complexity: O(log N + K).
 func (s *Store) GetWhen(key string, t time.Time) (Entry, bool) {
+	s.mu.RLock()
 	ents, ok := s.history[key]
 	if !ok || len(ents) == 0 {
+		s.mu.RUnlock()
 		return Entry{}, false
 	}
+	cp := make([]Entry, len(ents))
+	copy(cp, ents)
+	s.mu.RUnlock()
 
 	// Binary search for the first index with UpdatedAt > t (upper bound of t).
-	l, r := 0, len(ents) // search space is [l, r)
+	l, r := 0, len(cp) // search space is [l, r)
 	for l < r {
 		mid := l + (r-l)/2
 		if ents[mid].UpdatedAt.After(t) {
