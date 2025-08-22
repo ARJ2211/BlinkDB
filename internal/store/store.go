@@ -136,6 +136,8 @@ func (s *Store) GetHistory(key string) ([]Entry, bool) {
 // - Updates s.data[key].
 // - Appends the new version to s.history[key].
 func (s *Store) Set(key string, value string) Entry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	n := s.Clock.Now()
 	if existing, ok := s.data[key]; ok {
 		newEntry := Entry{
@@ -170,11 +172,16 @@ func (s *Store) Set(key string, value string) Entry {
 // Side effects:
 // - Updates s.data[key].
 // - Appends the new version (with ExpiresAt set/cleared) to s.history[key].
-func (s *Store) SetWithTTL(key string, value string, ttl time.Duration) Entry {
+func (s *Store) SetWithTTL(
+	key string,
+	value string,
+	ttl time.Duration) Entry {
 	n := s.Clock.Now()
 	if ttl <= 0 {
 		return s.Set(key, value)
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if existing, ok := s.data[key]; ok {
 		newEntry := Entry{
 			Value:     value,
@@ -205,6 +212,8 @@ func (s *Store) SetWithTTL(key string, value string, ttl time.Duration) Entry {
 // Returns true if the key was present (and a tombstone written), false otherwise.
 // Note: history is not pruned; tombstones and older versions remain.
 func (s *Store) Delete(key string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	entry, ok := s.data[key]
 	if !ok {
 		return false
