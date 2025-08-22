@@ -1,6 +1,7 @@
 package store
 
 import (
+	"sync"
 	"time"
 )
 
@@ -24,6 +25,7 @@ func (RealClock) Now() time.Time {
 //     every successful Set/SetWithTTL/CAS (whether or not the key later expired).
 //   - Concurrency: not safe for concurrent use. Mutex comes in milestone 1D.
 type Store struct {
+	mu      sync.RWMutex       // lock the concurrent bits
 	data    map[string]Entry   // current live snapshot per key
 	history map[string][]Entry // append-only log of versions per key
 	Clock   Clock              // time source (real or fake)
@@ -78,17 +80,35 @@ func (s *Store) nextVersionFromHistory(key string) int64 {
 // - Otherwise: return it.
 // Note: Get never reads or mutates s.history. Historical versions remain.
 func (s *Store) Get(key string) (Entry, bool) {
-	n := s.Clock.Now()
-	if entry, ok := s.data[key]; ok {
-		if entry.ExpiresAt.IsZero() {
-			return entry, true
-		}
-		if entry.ExpiresAt.Before(n) || entry.ExpiresAt.Equal(n) {
-			return Entry{}, false
-		}
-		return entry, true
+	now := s.Clock.Now()
+
+	s.mu.RLock()
+	e, ok := s.data[key]
+	if !ok {
+		s.mu.RUnlock()
+		return Entry{}, false
 	}
-	return Entry{}, false
+	// visible if no TTL or not expired yet
+	if e.ExpiresAt.IsZero() || now.Before(e.ExpiresAt) {
+		s.mu.RUnlock()
+		return e, true
+	}
+	s.mu.RUnlock()
+
+	// Looks expired: take write lock, re-check, and possibly delete.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	e, ok = s.data[key]
+	if !ok {
+		return Entry{}, false
+	}
+	now = s.Clock.Now()
+	if !e.ExpiresAt.IsZero() && (now.Equal(e.ExpiresAt) || now.After(e.ExpiresAt)) {
+		delete(s.data, key)
+		return Entry{}, false
+	}
+	return e, true
 }
 
 // GetHistory returns the full, append-only history for key in chronological
@@ -96,13 +116,16 @@ func (s *Store) Get(key string) (Entry, bool) {
 // Set/SetWithTTL/CAS writes (Deleted=false) and explicit deletes as tombstones
 // (Deleted=true, ExpiresAt=zero).
 func (s *Store) GetHistory(key string) ([]Entry, bool) {
+	s.mu.RLock()
 	hist, ok := s.history[key]
 	if !ok || len(hist) == 0 {
+		s.mu.RUnlock()
 		return nil, false
 	}
 	// defensive copy
 	out := make([]Entry, len(hist))
 	copy(out, hist)
+	s.mu.RUnlock()
 	return out, true
 }
 
