@@ -30,8 +30,9 @@ A compact, test-driven **Go** key–value store that keeps **full per-key histor
 7. [Testing](#testing)
 8. [Design Notes](#design-notes)
 9. [Concurreny & Locks](#concurrency--locks)
-10. [Roadmap](#roadmap)
-11. [FAQ](#faq)
+10. [Observability](#observability)
+11. [Roadmap](#roadmap)
+12. [FAQ](#faq)
 
 ---
 
@@ -86,6 +87,7 @@ keys := s.Keys()
 - **Tombstones** on explicit delete (historical evidence of removal).
 - **List keys**: `GET /v1/kv` returns live keys (after lazy expiry & sweeps).
 - **RFC3339 UTC** timestamps in API responses.
+- **Pretty logging**: HTTP middleware logs method, path, status, duration, and metadata with ANSI colors.
 
 ---
 
@@ -107,16 +109,31 @@ go run ./cmd/server --port 9000
 
 ```
 
+Run with sweeper enabled (default true)
+
+```bash
+go run ./cmd/server --sweep-enabled false
+
+```
+
+Run with a dedicated sweeper interval (default 30s)
+
+```bash
+go run ./cmd/server --sweep-interval 5s
+
+```
+
 Then hit (default router prefix):
 
 ```
-GET    /v1/kv                   # list keys
+GET    /v1/kv
 PUT    /v1/kv/{key}
 GET    /v1/kv/{key}
 GET    /v1/kv/{key}?at=<RFC3339>
 POST   /v1/kv/{key}:cas
 DELETE /v1/kv/{key}
 POST   /v1/admin/sweep
+GET    /v1/admin/history/{key}
 ```
 
 ---
@@ -496,10 +513,28 @@ go test -race ./...
 
 ---
 
+## Observability
+
+### Logging
+
+BlinkDB ships with **pretty, colorized HTTP logging middleware** (`observability/logging.go`):
+
+- Color-coded status codes (green 2xx, yellow 4xx, red 5xx).
+- Methods colored by verb (GET cyan, POST blue, PUT magenta, DELETE red).
+- Bold paths, dimmed metadata (remote, UA, timestamp).
+- Works as `http.Handler` middleware.
+
+Sweeper logs also use a human-friendly format with colored removed counts and durations.
+
+### Health & Metrics
+
+- `internal/observability/health.go`: liveness/readiness endpoints.
+- `internal/observability/metrics.go`: counters and gauges (planned Prometheus support).
+
+---
+
 ## Roadmap
 
-- **1D**: Add `sync.RWMutex` to make the store goroutine-safe; audit lazy-delete path under locks; add concurrency tests.
-- **Background sweeper**: optional goroutine to call `SweepExpired()` periodically.
 - **History inspection**: paged history export / debug endpoints.
 - **Persistence**: optional WAL/snapshots or pluggable engines (Bolt/Badger/Pebble).
 - **Metrics**: hit/miss, expirations, CAS success rate, sweep counts; tracing with OpenTelemetry.
