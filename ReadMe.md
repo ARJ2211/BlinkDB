@@ -6,7 +6,7 @@
 
 A compact, test-driven **Go** key–value store that keeps **full per-key history**, supports **TTL**, exposes **versioned CAS**, and answers **time-travel queries** (“what did this key look like at time _t_?”). Explicit deletes are recorded as **tombstones**, so time travel reflects removals.
 
-![demo](/assets/blinkdb.gif)
+![demo](https://raw.githubusercontent.com/ARJ2211/BlinkDB/5c499dd33948aa3b6cdb5817d96731929b7ffe3c/assets/blinkdb.gif)
 
 > **Status**  
 > ✅ Store layer (**1E**) complete: versions, TTL, CAS, append-only history, `GetWhen` snapshot semantics, tombstones.  
