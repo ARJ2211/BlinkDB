@@ -1,0 +1,25 @@
+version: "3.9"
+services:
+  blinkdb:
+    image: blinkdb:1.0.0
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VERSION: "v0.1.0"
+        COMMIT: "${COMMIT_SHA:-local}"
+        DATE: "${BUILD_DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+    environment:
+      PORT: 8080
+      SWEEP_ENABLED: "true"
+      SWEEP_INTERVAL: "15s"
+      DATA_DIR: /data
+      # Optional Go runtime tuning:
+      # GOMAXPROCS: "4"
+      # GOMEMLIMIT: "256MiB"
+    ports:
+      - "8080:8080"
+    volumes:
+      - blinkdb-data:/data   # placeholder for future persistence
+volumes:
+  blinkdb-data:
