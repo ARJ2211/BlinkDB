@@ -1,0 +1,18 @@
+# build/cache
+**/bin
+**/dist
+**/build
+**/.cache
+**/coverage
+**/*.out
+
+# vcs/editor
+.git
+.gitignore
+.gitattributes
+.idea
+.vscode
+
+# os cruft
+.DS_Store
+Thumbs.db
