@@ -22,18 +22,19 @@ A compact, test-driven **Go** key–value store that keeps **full per-key histor
 1. [Quickstart](#quickstart)
 2. [Features & Guarantees](#features--guarantees)
 3. [Run the Server](#run-the-server)
-4. [HTTP API](#http-api)
+4. [Docker](#docker)
+5. [HTTP API](#http-api)
    - [Conventions](#conventions)
    - [DTO Schemas](#dto-schemas)
    - [Endpoints](#endpoints)
-5. [Semantics & Examples](#semantics--examples)
-6. [Project Structure](#project-structure)
-7. [Testing](#testing)
-8. [Design Notes](#design-notes)
-9. [Concurreny & Locks](#concurrency--locks)
-10. [Observability](#observability)
-11. [Roadmap](#roadmap)
-12. [FAQ](#faq)
+6. [Semantics & Examples](#semantics--examples)
+7. [Project Structure](#project-structure)
+8. [Testing](#testing)
+9. [Design Notes](#design-notes)
+10. [Concurreny & Locks](#concurrency--locks)
+11. [Observability](#observability)
+12. [Roadmap](#roadmap)
+13. [FAQ](#faq)
 
 ---
 
@@ -135,6 +136,55 @@ POST   /v1/kv/{key}:cas
 DELETE /v1/kv/{key}
 POST   /v1/admin/sweep
 GET    /v1/admin/history/{key}
+```
+
+---
+
+## Docker
+
+BlinkDB ships with a Dockerfile and can be run in a container easily.
+
+### Build the image
+
+```bash
+docker build -t blinkdb:1.0.0 .
+```
+
+### Run the container
+
+```bash
+docker run --rm -p 8080:8080 blinkdb:1.0.0
+```
+
+This will start BlinkDB on port 8080.
+
+### Using docker-compose
+
+For convenience, you can also use docker-compose:
+
+```yaml
+version: "3.9"
+services:
+  blinkdb:
+    image: indianbollulz/blinkdb:1.0.0
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+```
+
+Start it with:
+
+```bash
+docker compose up --build
+```
+
+Once pushed to Docker Hub, anyone can pull and run:
+
+```bash
+docker pull indianbollulz/blinkdb:1.0.0
+docker run -p 8080:8080 indianbollulz/blinkdb:1.0.0
 ```
 
 ---
