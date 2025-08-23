@@ -1,7 +1,7 @@
 version: "3.9"
 services:
   blinkdb:
-    image: blinkdb:1.0.0
+    image: indianbollulz/blinkdb:1.0.0
     build:
       context: .
       dockerfile: Dockerfile
